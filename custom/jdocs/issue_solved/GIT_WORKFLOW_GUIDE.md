@@ -56,7 +56,55 @@ Isaac-GR00T/
 2. Click "Fork" button (top right)
 3. Create fork in your GitHub account (e.g., `yourusername/Isaac-GR00T`)
 
-### Step 2: Configure Git Remotes
+### Step 2: Set Up SSH Authentication (Recommended)
+
+**Why SSH?** Using SSH keys avoids repeated password prompts when pushing/pulling.
+
+#### Check if SSH Keys Exist
+
+```bash
+ls -la ~/.ssh/
+# Look for: id_ed25519 and id_ed25519.pub (or id_rsa and id_rsa.pub)
+```
+
+#### Generate SSH Key (if needed)
+
+```bash
+# Generate new SSH key
+ssh-keygen -t ed25519 -C "your_email@example.com"
+# Press Enter to accept default location
+# Enter passphrase (optional but recommended)
+
+# Start SSH agent
+eval "$(ssh-agent -s)"
+
+# Add key to agent
+ssh-add ~/.ssh/id_ed25519
+```
+
+#### Add SSH Key to GitHub
+
+```bash
+# Copy SSH public key to clipboard
+cat ~/.ssh/id_ed25519.pub
+# Copy the entire output
+
+# Then:
+# 1. Go to: https://github.com/settings/keys
+# 2. Click "New SSH key"
+# 3. Give it a title (e.g., "HP Workstation")
+# 4. Paste your public key
+# 5. Click "Add SSH key"
+```
+
+#### Test SSH Connection
+
+```bash
+ssh -T git@github.com
+# Expected output: "Hi YOUR_USERNAME! You've successfully authenticated..."
+```
+
+### Step 3: Configure Git Remotes
 
 ```bash
 cd ~/project/Isaac-GR00T
@@ -69,21 +117,41 @@ git remote -v
 # Rename NVIDIA's remote to 'upstream'
 git remote rename origin upstream
 
-# Add YOUR fork as 'origin'
-git remote add origin https://github.com/YOUR_USERNAME/Isaac-GR00T.git
+# Add YOUR fork as 'origin' using SSH (recommended)
+git remote add origin git@github.com:YOUR_USERNAME/Isaac-GR00T.git
+
+# OR if you prefer HTTPS (will prompt for credentials):
+# git remote add origin https://github.com/YOUR_USERNAME/Isaac-GR00T.git
 
 # Verify remotes
 git remote -v
-# Output:
-#   origin    https://github.com/YOUR_USERNAME/Isaac-GR00T.git (fetch)
-#   origin    https://github.com/YOUR_USERNAME/Isaac-GR00T.git (push)
-#   upstream  https://github.com/NVIDIA/Isaac-GR00T (fetch)
-#   upstream  https://github.com/NVIDIA/Isaac-GR00T (push)
+# Output (SSH):
+#   origin    git@github.com:YOUR_USERNAME/Isaac-GR00T.git (fetch)
+#   origin    git@github.com:YOUR_USERNAME/Isaac-GR00T.git (push)
+#   upstream  git@github.com:NVIDIA/Isaac-GR00T.git (fetch)
+#   upstream  git@github.com:NVIDIA/Isaac-GR00T.git (push)
 ```
 
 **Replace `YOUR_USERNAME` with your actual GitHub username!**
 
-### Step 3: Create Custom Directory Structure
+#### Convert Existing HTTPS to SSH
+
+If your remotes are already using HTTPS and you want to switch to SSH:
+
+```bash
+# Check current remotes
+git remote -v
+
+# If you see https:// URLs, convert them to SSH:
+git remote set-url origin git@github.com:YOUR_USERNAME/Isaac-GR00T.git
+git remote set-url upstream git@github.com:NVIDIA/Isaac-GR00T.git
+
+# Verify the change
+git remote -v
+# Should now show git@github.com:... format
+```
+
+### Step 4: Create Custom Directory Structure
 
 ```bash
 cd ~/project/Isaac-GR00T
@@ -94,7 +162,7 @@ mkdir -p custom/scripts
 # jdocs directory already exists (we created it earlier)
 ```
 
-### Step 4: Copy GR00T Scripts to Custom Directory
+### Step 5: Copy GR00T Scripts to Custom Directory
 
 ```bash
 # Copy scripts from XLeRobot to Isaac-GR00T/custom/
@@ -107,7 +175,7 @@ cp /home/jrobot/project/XLeRobot/scripts/setup_groot_env.sh custom/scripts/
 chmod +x custom/scripts/*.sh
 ```
 
-### Step 5: Create Custom README
+### Step 6: Create Custom README
 
 ```bash
 cat > custom/README.md << 'EOF'
@@ -146,7 +214,7 @@ See `/jdocs` directory for:
 EOF
 ```
 
-### Step 6: Update .gitignore (Preserve Custom Work)
+### Step 7: Update .gitignore (Preserve Custom Work)
 
 ```bash
 cd ~/project/Isaac-GR00T
@@ -166,7 +234,7 @@ EOF
 
 **Note:** We're NOT actually ignoring them - we WANT to commit them. The commented lines are just for reference.
 
-### Step 7: Commit Your Custom Work
+### Step 8: Commit Your Custom Work
 
 ```bash
 cd ~/project/Isaac-GR00T
@@ -192,7 +260,7 @@ git checkout -b custom-so101-setup
 # Or stay on main branch if you prefer
 ```
 
-### Step 8: Push to Your Fork
+### Step 9: Push to Your Fork
 
 ```bash
 cd ~/project/Isaac-GR00T
@@ -361,19 +429,48 @@ chmod +x custom/scripts/quick_install.sh
 
 ## Troubleshooting
 
-### "Permission denied" when pushing
+### "Permission denied" or prompted for password when pushing
 
-You may need to authenticate:
+**Problem:** You're using HTTPS URLs instead of SSH, or SSH keys aren't configured.
+
+**Solution:** Convert to SSH authentication (recommended):
 
 ```bash
-# Option 1: Use SSH (recommended)
-git remote set-url origin git@github.com:YOUR_USERNAME/Isaac-GR00T.git
+# Step 1: Verify SSH authentication works
+ssh -T git@github.com
+# Expected: "Hi YOUR_USERNAME! You've successfully authenticated..."
 
+# If authentication fails, set up SSH keys:
+# 1. Generate key: ssh-keygen -t ed25519 -C "your_email@example.com"
+# 2. Add to GitHub: https://github.com/settings/keys
+# 3. Test again: ssh -T git@github.com
+
+# Step 2: Check current remotes
+git remote -v
+
+# Step 3: Convert HTTPS to SSH
+git remote set-url origin git@github.com:YOUR_USERNAME/Isaac-GR00T.git
+git remote set-url upstream git@github.com:NVIDIA/Isaac-GR00T.git
+
+# Step 4: Verify change
+git remote -v
+# Should show: git@github.com:... (not https://)
+
+# Step 5: Try pushing again
+git push origin main
+```
+
+**Alternative Options:**
+
+```bash
 # Option 2: Use GitHub CLI
 gh auth login
 
-# Option 3: Use Personal Access Token
-# Set up token at: https://github.com/settings/tokens
+# Option 3: Use Personal Access Token with HTTPS
+# 1. Create token at: https://github.com/settings/tokens
+# 2. Select: repo, workflow scopes
+# 3. Use token as password when prompted
+# Note: Tokens expire and need renewal
 ```
 
 ### Merge conflicts with upstream
