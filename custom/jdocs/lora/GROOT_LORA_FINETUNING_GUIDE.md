@@ -222,44 +222,157 @@ NVIDIA GeForce RTX 5090 with CUDA capability sm_120 is not compatible
 
 ### Current Status
 
-- ✅ **Collected:** 10 episodes (mini-MVP validation)
-- 🎯 **Target for MVP:** 50 episodes
-- 🎯 **Target for Full:** 75-100 episodes
+- ✅ **Stage 0 Complete:** 10 episodes (mini-MVP validation)
+- 🎯 **Stage 1 Target:** 50 episodes (MVP multi-task validation)
+- 🎯 **Stage 2 Target:** 100 episodes (Full multi-task training)
 
-### Collection Strategy
+### Multi-Task Collection Strategy (Research-Backed)
 
-**Recommended Approach for MVP (50 episodes):**
+**Why Multi-Task from the Start?**
 
-**Option A: Single-Task (Safer)**
-- Collect 40 more episodes of same task ("grasp object")
-- Total: 50 episodes, 1 task
-- Pro: Simpler, focused learning
-- Con: Less generalization
+Based on extensive research from LoRA multi-task learning (2024), Mobile ALOHA, and NVIDIA GR00T best practices:
 
-**Option B: Multi-Task (Better Generalization)**
-- Collect 20 pick-and-place episodes
-- Collect 20 push/slide episodes
-- Total: 50 episodes, 2 tasks (including existing 10)
-- Pro: Better generalization, shared skills
-- Con: Slightly more complex data collection
+✅ **Shared Skills Transfer** - Reaching, grasping, and visual tracking skills learned in pick-and-place transfer to push, drawer tasks
+✅ **Better Generalization** - Multi-task models generalize better to new task combinations and variations
+✅ **Reusable Foundation** - All episodes contribute to final model; adding new tasks only needs 20-40 episodes
+✅ **LoRA Excels at Multi-Task** - Research shows LoRA with appropriate rank prioritizes instruction conformance over task memorization
+✅ **Efficient Long-Term** - 100 diverse episodes (10-15 hours) more valuable than 400 single-task episodes (25-30 hours)
 
-**Recommendation:** Start with Option A for first MVP to validate training, then expand to multi-task for full training.
+**Key Research Finding:**
+> "When configured with an appropriate rank, LoRA can achieve remarkable performance in multi-task scenarios. The constrained learning capacity encourages LoRA to prioritize conforming to instruction requirements rather than memorizing specialized features of particular tasks."
 
-### Recording Guidelines
+### Stage 1: MVP (50 Episodes) - Multi-Task Validation
 
-**Good Episodes:**
-- ✅ Task completed successfully
-- ✅ Smooth, natural motions
-- ✅ Good lighting and camera angles
-- ✅ No collisions or errors
+**Collection Approach:** Parallel collection in mini-steps across 4 core tasks
 
-**Bad Episodes:**
-- ❌ Task failed
-- ❌ Jerky motions
-- ❌ Poor visibility
-- ❌ Robot errors
+| Task Category | Episodes | Variations | Purpose |
+|---------------|----------|------------|---------|
+| **Pick** | 15 | 3 positions (center, left, right) | Core prehensile skill |
+| **Place** | 15 | 3 targets (box, left, right) | Complement to pick |
+| **Push** | 15 | Center + angled pushes | Non-prehensile diversity |
+| **Reach/Grasp** | 5 | Sub-components | Foundational skills |
+| **Total** | **50** | **4 tasks** | **Multi-task validation** |
 
-**Rule:** Only keep episodes you want the robot to imitate.
+**Week 1 Collection Schedule:**
+```
+Day 1-2: Pick variations (15 episodes, ~2.5 hours)
+Day 2-3: Place variations (15 episodes, ~2.5 hours)
+Day 3-4: Push variations (15 episodes, ~2.5 hours)
+Day 4-5: Reach/Grasp (5 episodes, ~1 hour)
+Day 5: Quality review and re-recording
+
+Total: ~7-8 hours collection time
+```
+
+**GR00T SO-101 MVP Benchmark:**
+| Metric | Target | Source |
+|--------|--------|--------|
+| Overall Success | 35-50% | GR00T community reports |
+| Pick-and-place | 40-55% | Similar to base GR00T |
+| Push | 25-35% | Expected lower for non-prehensile |
+| Multi-task avg | 35-45% | Realistic with 4 tasks |
+
+**Decision Point After MVP:**
+- ✅ If success >30% → Proceed to Stage 2 (full training)
+- ⚠️ If success 20-30% → Collect 10-20 more of weakest task
+- ❌ If success <20% → Review data quality, check pipeline
+
+### Stage 2: Full Training (100 Episodes) - Comprehensive Multi-Task
+
+**Collection Approach:** Expand to 6-7 manipulation primitives
+
+| Task Category | Episodes | Variations | Rationale |
+|---------------|----------|------------|-----------|
+| **Pick** | 20 | Expand positions + objects | Core skill foundation |
+| **Place** | 20 | Expand targets + precision | Complement to pick |
+| **Push** | 15 | Multiple angles, distances | Non-prehensile coverage |
+| **Reach** | 10 | Varied positions | Motion planning |
+| **Grasp** | 10 | Different approaches | Manipulation precision |
+| **Drawer Open** | 15 | Contact-rich task | Aligned motion |
+| **Drawer Close** | 10 | Reversal of open | Bidirectional skill |
+| **Total** | **100** | **7 tasks** | **Comprehensive agent** |
+
+**Why 7 Tasks?**
+- Research shows 5-7 tasks optimal for 100-episode datasets
+- Covers manipulation taxonomy comprehensively
+- Diminishing returns beyond 7 tasks at this scale
+- Matches NVIDIA GR00T's "1K episodes across multiple tasks" approach
+
+**Weeks 2-3 Collection Schedule:**
+```
+Week 2: Expand core tasks (30 episodes, ~5 hours)
+├─ Day 1-2: Pick expansion (+10 episodes)
+├─ Day 3: Place expansion (+10 episodes)
+└─ Day 4-5: Push expansion (+10 episodes)
+
+Week 3: Add new tasks (20 episodes, ~3-4 hours)
+├─ Day 1-2: Drawer open (15 episodes)
+└─ Day 3-4: Drawer close (10 episodes)
+
+Total: 100 episodes, ~15 hours collection time
+```
+
+**GR00T SO-101 Full Training Benchmark:**
+| Dataset Size | Tasks | Expected Success | Source |
+|--------------|-------|------------------|---------|
+| 75 episodes | 3-4 | 50-65% | GR00T community |
+| 100 episodes | 5-7 | 65-80% | GR00T N1.5 post-training |
+| Your target | 7 | **Match 65-80%** | Benchmark goal |
+
+**Research Evidence:**
+- NVIDIA GR00T: 1K episodes across tasks on Unitree G1
+- Mobile ALOHA: 80% success with 50 demos per task using co-training
+- LeRobot: "50+ trajectories can effectively adapt pre-trained model"
+
+### Quality Principles (Critical for Success)
+
+**"50 Perfect Episodes > 150 Mediocre Episodes"**
+
+✅ **Per-Episode Quality Checklist:**
+1. **Task Success** - Must complete successfully, no partial attempts
+2. **Smooth Motion** - Slow, natural movements (NOT fast jerky motions!)
+3. **Camera Visibility** - Object visible in ALL cameras throughout
+4. **Consistent Strategy** - Same approach per primitive, every time
+5. **No Errors** - No collisions, safety stops, or unexpected behaviors
+6. **5Hz Action Frequency** - Critical for GR00T compatibility
+
+**Top 3 Common Mistakes to Avoid:**
+
+1. **Too Fast Demonstrations** ⚠️ #1 Community Issue
+   - Move SLOWLY - speed comes from model, not demos
+   - Take 3-5 seconds for simple reach
+   - Take 10-15 seconds for pick-and-place
+
+2. **Inconsistent Approach Per Task**
+   - Pick same strategy every time (e.g., always grasp from top)
+   - Don't switch between side-grasp and top-grasp randomly
+
+3. **Poor Camera Visibility**
+   - Object must be visible in BOTH cameras
+   - Egocentric cameras are 15-25% harder than fixed
+   - Test visibility before recording full set
+
+### Parallel Collection Workflow
+
+**Collect all tasks simultaneously in mini-steps:**
+
+```
+Example Day 1 (Pick task):
+├─ Setup: Position objects in 3 locations
+├─ Record 5 center picks
+├─ Record 5 left picks
+├─ Record 5 right picks
+└─ Review quality, re-record failures
+
+Example Day 3 (Push task):
+├─ Setup: Various push scenarios
+├─ Record 5 straight pushes
+├─ Record 5 angled left pushes
+├─ Record 5 angled right pushes
+└─ Review quality
+
+Benefit: Single setup per task, collect variations efficiently
+```
 
 ### Dataset Format After Collection
 
@@ -270,7 +383,7 @@ python /home/jrobot/project/Isaac-GR00T/custom/scripts/convert_lerobot_v3_to_gro
     --dataset-path /home/jrobot/project/XLeRobot/jdocs/top_level/datasets \
     --robot-type so101 \
     --dual-camera \
-    --task-description "your_task_description"
+    --task-description "multi_task_manipulation"
 ```
 
 **This script automatically:**
@@ -280,6 +393,34 @@ python /home/jrobot/project/Isaac-GR00T/custom/scripts/convert_lerobot_v3_to_gro
 4. Generates tasks.jsonl
 5. Creates backups
 6. Validates conversion
+
+### Adding New Tasks Later
+
+**Question:** "Do I need another 50-100 episodes for each new task?"
+
+**Answer:** ❌ NO! Only need 20-40 episodes, then retrain on COMBINED dataset.
+
+**Incremental Learning Strategy:**
+
+```
+After initial 100-episode training:
+
+Want to add: Stack blocks
+
+Step 1: Collect 30 episodes of stacking
+Step 2: Combine with existing 100 → 130 total
+Step 3: Retrain on COMBINED dataset
+Step 4: Model learns stacking WITHOUT forgetting old tasks
+```
+
+**Episodes Needed for New Task:**
+| Task Similarity | Episodes | Example |
+|-----------------|----------|---------|
+| Very similar | 10-20 | Pick cube → Pick cylinder |
+| Related | 20-40 | Pick → Push |
+| Different | 40-60 | Pick → Drawer |
+
+**Key Principle:** Always retrain on combined dataset to avoid catastrophic forgetting
 
 ---
 
@@ -637,39 +778,103 @@ Verified:
 
 ## Progress Tracking
 
-### Completed Steps ✅
+### Stage 0: Mini-MVP ✅ COMPLETE
 
 - [x] Environment setup (groot conda env)
-- [x] Mini-MVP validation (10 episodes)
+- [x] 10 episodes collected (single task validation)
 - [x] Dataset format conversion identified and automated
-- [x] Training scripts validated
+- [x] Training scripts validated and synchronized
 - [x] RTX 5090 compatibility confirmed
-- [x] Documentation created
+- [x] Pipeline validated: model loading, dataset loading, LoRA config
+- [x] Documentation created (conversion guide, validation report)
 
-### Current Status 📍
+**Status:** ✅ Pipeline works! Ready for Stage 1.
 
-**Mini-MVP: ✅ COMPLETE**
-**Next Milestone: MVP Training (50 episodes)**
+### Stage 1: MVP Training (50 Episodes) - IN PROGRESS
+
+**Target:** Multi-task validation with 4 core tasks
+
+**Data Collection Checklist:**
+- [ ] Fix wandb authentication (`export WANDB_DISABLED=true`)
+- [ ] Collect Pick episodes (15 episodes, 3 positions)
+- [ ] Collect Place episodes (15 episodes, 3 targets)
+- [ ] Collect Push episodes (15 episodes, varied angles)
+- [ ] Collect Reach/Grasp episodes (5 episodes)
+- [ ] **Total: 50 episodes across 4 tasks**
+- [ ] Run dataset conversion script
+- [ ] Validate dataset quality (review episodes)
+
+**Training Checklist:**
+- [ ] Run MVP training (500 steps, ~1-2 hours)
+- [ ] Monitor loss convergence
+- [ ] Save checkpoint at step 500
+- [ ] Evaluate on robot (10 trials per task)
+
+**Success Criteria:**
+- ✅ Overall success >30% (GR00T SO-101 benchmark: 35-50%)
+- ✅ Pick-and-place: 40-55%
+- ✅ Push: 25-35%
+- ✅ Multi-task learning validated (all tasks show >25%)
+
+**Decision Point:**
+- If success >30% → Proceed to Stage 2 ✅
+- If success 20-30% → Collect 10-20 more of weakest task
+- If success <20% → Review data quality and pipeline
+
+### Stage 2: Full Training (100 Episodes) - PENDING
+
+**Target:** Comprehensive multi-task agent with 7 tasks
+
+**Data Collection Checklist:**
+- [ ] Expand Pick (20 total, +5 episodes)
+- [ ] Expand Place (20 total, +5 episodes)
+- [ ] Expand Push (15 total, +0 episodes)
+- [ ] Expand Reach (10 total, +5 episodes)
+- [ ] Expand Grasp (10 total, +5 episodes)
+- [ ] NEW: Drawer Open (15 episodes)
+- [ ] NEW: Drawer Close (10 episodes)
+- [ ] **Total: 100 episodes across 7 tasks**
+- [ ] Run dataset conversion script
+- [ ] Validate dataset quality
+
+**Training Checklist:**
+- [ ] Run full training (10,000 steps, ~6-8 hours)
+- [ ] Monitor loss convergence (target <0.3)
+- [ ] Save checkpoints every 1,000 steps
+- [ ] Evaluate on robot (10 trials per task, 70 total)
+
+**Success Criteria:**
+- ✅ Overall success 65-80% (GR00T SO-101 benchmark)
+- ✅ Core tasks (pick/place/push): 70-85%
+- ✅ New tasks (drawer): 50-65%
+- ✅ Multi-task performance competitive with single-task models
+
+**Deployment:**
+- [ ] Select best checkpoint (likely step 8,000-10,000)
+- [ ] Copy to production location
+- [ ] Create deployment config
+- [ ] Monitor real-world performance
 
 ### Next Steps 🎯
 
-#### Immediate (Before MVP):
+#### Immediate (Stage 1 Preparation):
 
 1. **Fix wandb authentication** (5 minutes)
    ```bash
    export WANDB_DISABLED=true
    ```
 
-2. **Collect 40 more episodes** (3-5 days)
-   - Recommended: Same task as existing 10 episodes
-   - Alternative: Multi-task (20 pick + 20 push)
+2. **Collect 50 episodes multi-task** (~1 week, 7-8 hours total)
+   - Week 1: All 4 tasks in parallel using mini-steps
+   - See "Stage 1: MVP" in Dataset Collection section for breakdown
 
 3. **Convert dataset**
    ```bash
    python /home/jrobot/project/Isaac-GR00T/custom/scripts/convert_lerobot_v3_to_groot.py \
        --dataset-path /home/jrobot/project/XLeRobot/jdocs/top_level/datasets \
        --robot-type so101 \
-       --dual-camera
+       --dual-camera \
+       --task-description "multi_task_manipulation"
    ```
 
 4. **Run MVP training** (1-2 hours)
@@ -677,12 +882,20 @@ Verified:
    bash /home/jrobot/project/Isaac-GR00T/custom/scripts/train_groot_so101_mvp.sh
    ```
 
-#### After MVP Success:
+5. **Evaluate and make decision**
+   - Test on robot (10 trials per task)
+   - Compare against GR00T SO-101 benchmarks
+   - Decide: proceed to Stage 2 or collect more data
 
-5. Collect 25-50 more episodes (reach 75-100 total)
-6. Run full training (6-8 hours)
-7. Evaluate on robot
-8. Deploy to production
+#### After Stage 1 Success (>30%):
+
+6. **Collect 50 more episodes for Stage 2** (~2 weeks, 7-8 hours)
+   - Expand existing 4 tasks (20 episodes)
+   - Add 3 new tasks (30 episodes)
+
+7. **Run full training** (6-8 hours overnight)
+
+8. **Final evaluation and deployment**
 
 ---
 
