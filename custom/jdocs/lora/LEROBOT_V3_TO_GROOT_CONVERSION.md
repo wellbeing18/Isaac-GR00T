@@ -20,6 +20,81 @@ GR00T's training pipeline expects **LeRobot v2 format**, but newer datasets are 
 
 ---
 
+## Critical Issues Solved
+
+### Issue 1: Separate Dataset Required for Multi-Model Training
+
+**Problem:** Pi0.5 and GR00T require different dataset formats
+
+- **Pi0.5**: Uses LeRobot v3 format (consolidated parquet files)
+- **GR00T**: Uses LeRobot v2 format (per-episode parquet files)
+- **Conflict**: Modifying shared dataset breaks parallel training
+
+**✅ Solution:** Create separate dataset copies
+
+```bash
+# Pi0.5 dataset (keep as-is)
+/home/jrobot/project/XLeRobot/jdocs/top_level/datasets/
+
+# GR00T dataset (new copy with v2 format)
+/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot/
+```
+
+### Issue 2: Parquet File Structure
+
+**Problem:** GR00T dataloader expects per-episode parquet files
+
+- **LeRobot v3**: Single `file-000.parquet` with all episodes
+- **GR00T**: Separate `episode_NNN.parquet` files
+
+**✅ Solution:** Split parquet by episode with reset indices
+
+```python
+import pandas as pd
+from pathlib import Path
+
+dataset_path = Path('/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot')
+data_dir = dataset_path / 'data' / 'chunk-000'
+parquet_file = data_dir / 'file-000.parquet'
+df = pd.read_parquet(parquet_file)
+
+for episode_idx in sorted(df['episode_index'].unique()):
+    episode_df = df[df['episode_index'] == episode_idx].copy()
+    episode_df = episode_df.reset_index(drop=True)  # CRITICAL: 0-based per episode
+    output_file = data_dir / f'episode_{episode_idx:03d}.parquet'
+    episode_df.to_parquet(output_file)
+```
+
+**Why Reset Indices?**
+- GR00T accesses frames by episode-relative index (0-149)
+- Global indices (0-1499) cause `KeyError` when accessing step 40 in episode 1
+- Each episode must have its own 0-based index range
+
+### Issue 3: Video Path Patterns
+
+**Problem:** info.json path pattern mismatch
+
+**LeRobot v3 info.json:**
+```json
+{
+  "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+  "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+}
+```
+
+**GR00T Expected:**
+```json
+{
+  "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:03d}.parquet",
+  "video_path": "videos/{video_key}/chunk-{episode_chunk:03d}/file-000.mp4"
+}
+```
+
+**Key Difference:**
+- Data uses `episode_NNN.parquet` (split files)
+- Videos use `file-000.mp4` (single consolidated file)
+- Variable names change: `chunk_index` → `episode_chunk`, `file_index` → `episode_index`
+
 ## Required Conversions
 
 ### 1. modality.json Format

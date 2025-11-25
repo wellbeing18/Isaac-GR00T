@@ -14,15 +14,16 @@
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Prerequisites](#prerequisites)
-3. [✅ COMPLETED: Mini-MVP Validation](#completed-mini-mvp-validation)
-4. [Dataset Collection](#dataset-collection)
-5. [Environment Setup](#environment-setup)
-6. [MVP Training (500 Steps)](#mvp-training-500-steps)
-7. [Full Training (10,000 Steps)](#full-training-10000-steps)
-8. [Evaluation & Deployment](#evaluation--deployment)
-9. [Troubleshooting](#troubleshooting)
-10. [Progress Tracking](#progress-tracking)
+2. [Quick Start - Reusable Workflow](#quick-start---reusable-workflow)
+3. [Prerequisites](#prerequisites)
+4. [✅ COMPLETED: Mini-MVP Validation](#completed-mini-mvp-validation)
+5. [Dataset Collection](#dataset-collection)
+6. [Environment Setup](#environment-setup)
+7. [MVP Training (500 Steps)](#mvp-training-500-steps)
+8. [Full Training (10,000 Steps)](#full-training-10000-steps)
+9. [Evaluation & Deployment](#evaluation--deployment)
+10. [Troubleshooting](#troubleshooting)
+11. [Progress Tracking](#progress-tracking)
 
 ---
 
@@ -51,6 +52,119 @@ MVP (500 steps, 1-2 hours)
 Full Training (10,000 steps, 6-8 hours)
 └── Production model with 75-100 episodes
 ```
+
+---
+
+## Quick Start - Reusable Workflow
+
+**This section provides a complete, copy-paste workflow for training GR00T on ANY dataset at ANY scale.**
+
+### Universal 4-Step Workflow
+
+**Step 1: Copy Your Dataset**
+```bash
+cd /home/jrobot/project/XLeRobot/jdocs/top_level
+
+# Choose a descriptive name for your training run
+DATASET_NAME="datasets_groot_YOUR_TASK_HERE"
+
+# Examples:
+# DATASET_NAME="datasets_groot_mvp_50ep"          # MVP test
+# DATASET_NAME="datasets_groot_full_100ep"        # Full training
+# DATASET_NAME="datasets_groot_drawer_task"       # Task-specific
+# DATASET_NAME="datasets_groot_deploy_20241124"   # Deployment with date
+
+# Copy your LeRobot v3 dataset
+cp -r datasets/ ${DATASET_NAME}/
+```
+
+**Step 2: Convert to GR00T Format**
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+conda activate groot
+
+python custom/scripts/convert_lerobot_v3_to_groot.py \
+    --dataset-path /home/jrobot/project/XLeRobot/jdocs/top_level/${DATASET_NAME} \
+    --robot-type so101 \
+    --dual-camera \
+    --task-description "YOUR_TASK_DESCRIPTION"
+```
+
+**What this does:**
+- Converts modality.json to GR00T format
+- Fixes stats.json count fields
+- Generates episodes.jsonl and tasks.jsonl
+- **Splits parquet files** into per-episode format with reset indices (CRITICAL!)
+- Creates backup of original consolidated parquet
+
+**Step 3: Configure Training Script**
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+
+# For MVP (500 steps): Edit custom/scripts/train_groot_so101_mvp.sh
+# For Full (10K steps): Edit custom/scripts/train_groot_so101_full.sh
+
+# Update these lines:
+# DATASET_PATH="/home/jrobot/project/XLeRobot/jdocs/top_level/${DATASET_NAME}"
+# OUTPUT_DIR="/home/jrobot/project/XLeRobot/outputs/groot_YOUR_RUN_NAME"
+```
+
+**Step 4: Run Training**
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+
+# For MVP (500 steps, ~1-2 hours)
+bash custom/scripts/train_groot_so101_mvp.sh
+
+# OR for Full Training (10,000 steps, ~6-8 hours)
+bash custom/scripts/train_groot_so101_full.sh
+```
+
+---
+
+### Quick Reference Table
+
+| Training Type | Episodes Needed | Steps | Duration | Script |
+|---------------|----------------|-------|----------|--------|
+| **Mini-MVP** | 10 | 100 | 5-10 min | `train_groot_mini_mvp.sh` |
+| **MVP** | 50+ | 500 | 1-2 hours | `train_groot_so101_mvp.sh` |
+| **Full** | 75-100 | 10,000 | 6-8 hours | `train_groot_so101_full.sh` |
+
+---
+
+### Dataset Naming Best Practices
+
+```bash
+# By scale
+datasets_groot_mini_mvp_10ep       # Mini-MVP with 10 episodes
+datasets_groot_mvp_50ep            # MVP with 50 episodes
+datasets_groot_full_100ep          # Full training with 100 episodes
+
+# By task
+datasets_groot_drawer_open         # Task: open drawer
+datasets_groot_pick_place          # Task: pick and place
+datasets_groot_multi_task          # Multiple tasks
+
+# By version/date
+datasets_groot_v1                  # Version 1
+datasets_groot_v2_improved         # Version 2 with improvements
+datasets_groot_deploy_20241124     # Deployment dated 2024-11-24
+
+# Combined
+datasets_groot_drawer_100ep_v2     # Task + episodes + version
+```
+
+---
+
+### Reusability Notes
+
+**Same workflow for all scenarios:**
+- Different datasets → Change `DATASET_NAME`
+- Different tasks → Change `--task-description`
+- Different scales → Use different training script (mvp vs full)
+- Different versions → Change `OUTPUT_DIR` suffix
+
+**No code changes needed!** Just update configuration variables.
 
 ---
 
@@ -176,43 +290,197 @@ Tune action head DiT: False ✅
 export WANDB_DISABLED=true
 ```
 
-#### ✅ RTX 5090 Compatibility - NO ISSUE!
+#### ✅ RTX 5090 Blackwell Compatibility - SOLVED!
 
-**Warning Appears:**
+**Critical Issue:** RTX 5090 requires bleeding-edge PyTorch and flash-attn compilation
+
+**Error Encountered:**
 ```
-NVIDIA GeForce RTX 5090 with CUDA capability sm_120 is not compatible
+RuntimeError: CUDA error: no kernel image is available for execution on the device
+UserWarning: NVIDIA GeForce RTX 5090 with CUDA capability sm_120 is not compatible
 ```
 
-**✅ Reality: GPU works perfectly!**
-- CUDA available: True
-- GPU detected and used successfully
-- 7GB VRAM allocated during training
-- Matrix operations on GPU verified
+**Root Cause:**
+- RTX 5090 uses **Blackwell architecture (sm_120 / compute capability 12.0)**
+- PyTorch 2.5.1 only supports up to sm_90 (Hopper/H100)
+- Flash-attn compiled for older architectures incompatible with new PyTorch
 
-**Explanation:** PyTorch 2.5.1 doesn't have optimized sm_120 kernels but runs RTX 5090 in backward-compatible mode. The warning is **informational only** - everything works correctly.
+**✅ Solution Applied:**
 
-**Action:** Ignore the warning - no changes needed ✅
+1. **Upgrade PyTorch to 2.10.0 nightly with CUDA 13.0:**
+   ```bash
+   conda activate groot
+   pip install --upgrade --force-reinstall torch torchvision \
+       --index-url https://download.pytorch.org/whl/nightly/cu130
+   ```
+
+2. **Recompile flash-attn for sm_120 only (faster compilation):**
+   ```bash
+   cd /tmp && rm -rf flash-attention
+   git clone https://github.com/Dao-AILab/flash-attention.git
+   cd flash-attention
+
+   # Edit setup.py to compile only for sm_120 (line 70):
+   # Change: return os.getenv("FLASH_ATTN_CUDA_ARCHS", "80;90;100;110;120").split(";")
+   # To:     return os.getenv("FLASH_ATTN_CUDA_ARCHS", "120").split(";")
+
+   conda activate groot
+   pip install . --no-build-isolation --no-cache-dir
+   ```
+
+3. **Verify installation:**
+   ```bash
+   python -c "import torch; print(torch.cuda.get_device_capability(0))"
+   # Should print: (12, 0) with NO warnings
+
+   python -c "import flash_attn; print(flash_attn.__version__)"
+   # Should print: 2.8.3
+   ```
+
+**Performance Impact:**
+- ✅ Training works perfectly on RTX 5090
+- ✅ ~8.5x faster than Pi0.5 (23s vs 196s for 100 steps)
+- ✅ Full GPU utilization achieved
+
+**Critical Files Modified:**
+- `/tmp/flash-attention/setup.py` - Modified to compile only sm_120
+- Environment: PyTorch 2.10.0.dev20251123+cu130
+- Flash-attn: 2.8.3 (compiled from source)
+
+**Why sm_120 Only?**
+Compiling flash-attn for all architectures (sm_80,90,100,120) takes 40-60 minutes. Compiling only sm_120 takes ~25 minutes. Since you only have RTX 5090, single-architecture is optimal.
+
+**Action:** ✅ **COMPLETED** - RTX 5090 fully supported with PyTorch 2.10.0
+
+#### ✅ Dataset Isolation - Multiple Models, Separate Datasets
+
+**Critical Discovery:** Different models require different dataset formats
+
+**Problem:**
+- Pi0.5 training uses LeRobot v3 format at `datasets/`
+- GR00T training requires LeRobot v2 format
+- Modifying shared dataset breaks Pi0.5 training
+
+**✅ Solution: Separate Dataset Copies**
+
+Created `datasets_groot/` specifically for GR00T with proper v2 format:
+
+```bash
+# Original Pi0.5 dataset (LeRobot v3)
+/home/jrobot/project/XLeRobot/jdocs/top_level/datasets/
+├── data/chunk-000/file-000.parquet     # Single parquet, all episodes
+├── videos/                              # Shared videos
+└── meta/                                # v3 format metadata
+
+# New GR00T dataset (LeRobot v2)
+/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot/
+├── data/chunk-000/
+│   ├── episode_000.parquet              # Split per episode
+│   ├── episode_001.parquet              # Each with indices 0-149
+│   └── ... episode_009.parquet
+├── videos/                              # Shared (symlink or copy)
+└── meta/                                # v2 format metadata
+```
+
+**Parquet File Requirements for GR00T:**
+1. **Per-episode files** instead of consolidated chunk files
+2. **Reset indices** (0-149 per episode, NOT global 0-1499)
+3. **Naming**: `episode_{episode_index:03d}.parquet`
+
+**Splitting Script:**
+```python
+import pandas as pd
+from pathlib import Path
+
+dataset_path = Path('/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot')
+data_dir = dataset_path / 'data' / 'chunk-000'
+parquet_file = data_dir / 'file-000.parquet'
+df = pd.read_parquet(parquet_file)
+
+for episode_idx in sorted(df['episode_index'].unique()):
+    episode_df = df[df['episode_index'] == episode_idx].copy()
+    episode_df = episode_df.reset_index(drop=True)  # CRITICAL: Reset to 0-149
+    output_file = data_dir / f'episode_{episode_idx:03d}.parquet'
+    episode_df.to_parquet(output_file)
+```
+
+**Why This Matters:**
+- GR00T's dataloader expects per-episode parquet files
+- Each episode must have 0-based indices for proper data access
+- Videos can remain shared (not split)
+- Allows parallel training of different models on same source data
+
+**Dataset Path Updates:**
+```bash
+# Training scripts now use separate paths
+PI05_DATASET="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets"
+GROOT_DATASET="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot"
+```
 
 ### Lessons Learned
 
-1. ✅ **Mini-MVP testing catches issues early** - Found 4 format issues before 50-episode collection
-2. ✅ **LeRobot v3 → v2 conversion is essential** - All datasets need conversion
-3. ✅ **Automated tools save time** - Script converts datasets in seconds
-4. ✅ **LoRA is extremely efficient** - Only 0.12% trainable params
-5. ✅ **RTX 5090 works despite warning** - GPU compatibility confirmed
+1. ✅ **Mini-MVP testing catches issues early** - Found 6+ critical issues before full training
+2. ✅ **LeRobot v3 → v2 conversion is essential** - All GR00T datasets need conversion
+3. ✅ **Separate datasets for separate models** - Don't mix Pi0.5 v3 and GR00T v2 formats
+4. ✅ **Per-episode parquet files required** - GR00T expects split files with reset indices
+5. ✅ **Automated tools save time** - Scripts handle conversion and splitting
+6. ✅ **LoRA is extremely efficient** - Only 0.12% trainable params, 8.5x faster than Pi0.5
+7. ✅ **RTX 5090 requires PyTorch 2.10+** - Must upgrade from 2.5.1 for Blackwell support
+8. ✅ **Flash-attn needs recompilation** - Compile for sm_120 only to save time
+
+### Performance Comparison: GR00T vs Pi0.5
+
+**Mini-MVP Benchmark (100 steps, same dataset):**
+
+| Model | Training Time | Steps/Sec | Speed vs Pi0.5 |
+|-------|--------------|-----------|----------------|
+| **GR00T N1.5-3B** | 23 seconds | 4.33 | **8.5x faster** ⚡ |
+| Pi0.5 (4B) | 196 seconds | 0.51 | 1.0x (baseline) |
+
+**Why GR00T is 8.5x Faster:**
+
+1. **Smaller Model**: 3B params vs 4B params
+2. **Efficient Architecture**: Vision+Diffusion vs PaliGemma+Gemma Expert dual-tower
+3. **Less LoRA Overhead**: Single action head vs dual LoRA (PaliGemma + Action Expert)
+4. **Optimized for RTX 5090**: Flash-attn compiled for sm_120, PyTorch 2.10 with CUDA 13.0
+
+**Training Metrics:**
+```
+GR00T:
+- Runtime: 23.1s (100 steps)
+- Loss: 1.22 → 0.46
+- VRAM: ~7GB
+- Throughput: 17.3 samples/sec
+
+Pi0.5:
+- Runtime: 196s (100 steps)
+- Loss: 0.107 → 0.070
+- VRAM: ~10GB
+- Update time: 1.95s/step
+```
+
+**Practical Impact:**
+- **MVP training (500 steps)**: GR00T ~2 min vs Pi0.5 ~16 min
+- **Full training (10K steps)**: GR00T ~40 min vs Pi0.5 ~5.5 hours
+- **Iteration speed**: Much faster experimentation with GR00T
 
 ### Mini-MVP Checklist
 
 - [x] Environment setup (groot conda env)
 - [x] 10 episodes collected
 - [x] Dataset format conversion
-- [x] Training script fixes
+- [x] Dataset parquet file splitting
+- [x] Separate dataset copy for GR00T
+- [x] Training script fixes (TensorBoard)
+- [x] PyTorch 2.10.0 upgrade for RTX 5090
+- [x] Flash-attn recompilation for sm_120
 - [x] Model downloading and loading
 - [x] LoRA configuration validation
 - [x] Dataset loading and batching
 - [x] Memory usage verification
 - [x] Automated conversion script created
 - [x] Documentation written
+- [x] Training completed successfully (23s, 100 steps)
 - [ ] Fix wandb authentication (before MVP) ← **NEXT STEP**
 - [ ] Collect 40 more episodes (before MVP)
 
@@ -466,46 +734,236 @@ export ISAAC_GROOT_ROOT=/home/jrobot/project/Isaac-GR00T
 
 **Purpose:** Validate training works with 50 episodes before committing to full 6-8 hour training.
 
-### Prerequisites
+### Prerequisites Checklist
 
-- [ ] 50 episodes collected
-- [ ] Dataset converted to GR00T format
-- [ ] Wandb authentication fixed
+- [ ] 50+ episodes collected in LeRobot v3 format
+- [ ] Source dataset at: `/home/jrobot/project/XLeRobot/jdocs/top_level/datasets/`
+- [ ] Environment activated: `conda activate groot`
+- [ ] TensorBoard preferred over Wandb (simpler)
 
-### Fix Wandb Authentication
+---
 
-**Before running MVP, choose one:**
+### Workflow Summary
 
-**Option A: Disable wandb (simplest)**
+**Quick Reference:**
 ```bash
-export WANDB_DISABLED=true
+# 1. Copy dataset
+DATASET_NAME="datasets_groot_mvp_50ep"
+cp -r datasets/ ${DATASET_NAME}/
+
+# 2. Convert to GR00T format
+python custom/scripts/convert_lerobot_v3_to_groot.py \
+    --dataset-path /path/to/${DATASET_NAME} \
+    --robot-type so101 --dual-camera
+
+# 3. Update script: Edit train_groot_so101_mvp.sh
+#    - DATASET_PATH → point to ${DATASET_NAME}
+#    - OUTPUT_DIR → customize for this run
+
+# 4. Train
+bash custom/scripts/train_groot_so101_mvp.sh
 ```
 
-**Option B: Configure wandb**
+**Reusability:** Change `DATASET_NAME` for different datasets. Repeat steps 1-4 for each new dataset or training run.
+
+---
+
+### Step-by-Step MVP Workflow
+
+#### Step 1: Create Separate GR00T Dataset Copy
+
+**Why?** GR00T needs v2 format, Pi0.5 uses v3 format. Keep separate to avoid conflicts.
+
 ```bash
-wandb login
-# Enter your API key when prompted
+# Navigate to datasets directory
+cd /home/jrobot/project/XLeRobot/jdocs/top_level
+
+# Check your source dataset
+ls -lh datasets/
+# Should show: data/, videos/, meta/
+
+# Create a copy for GR00T (or use a new dataset name)
+DATASET_NAME="datasets_groot_mvp_50ep"  # Customize this for each training run
+
+# Option A: Copy existing dataset
+cp -r datasets/ ${DATASET_NAME}/
+
+# Option B: If you just collected new data, it's already in datasets/
+# Just give it a unique name for GR00T conversion
 ```
 
-### Run MVP Training
+**Dataset Naming Convention:**
+```bash
+datasets_groot_mvp_50ep      # MVP test with 50 episodes
+datasets_groot_full_100ep    # Full training with 100 episodes
+datasets_groot_task_drawer   # Specific task training
+```
+
+#### Step 2: Convert Dataset to GR00T Format
+
+**Run the automated conversion script:**
 
 ```bash
 cd /home/jrobot/project/Isaac-GR00T
 
-# Disable wandb if you chose Option A
-export WANDB_DISABLED=true
+# Activate groot environment if not already
+conda activate groot
 
-# Run MVP training
+# Run conversion script
+python custom/scripts/convert_lerobot_v3_to_groot.py \
+    --dataset-path /home/jrobot/project/XLeRobot/jdocs/top_level/${DATASET_NAME} \
+    --robot-type so101 \
+    --dual-camera \
+    --task-description "multi_task_manipulation"
+```
+
+**What this script does (5 steps):**
+1. ✅ Converts `modality.json` to GR00T format
+2. ✅ Fixes `stats.json` count fields (per-dimension)
+3. ✅ Generates `episodes.jsonl` from episode metadata
+4. ✅ Generates `tasks.jsonl` with task descriptions
+5. ✅ **NEW:** Splits parquet files into per-episode format with reset indices
+
+**Expected output:**
+```
+======================================================================
+LeRobot v3 → GR00T Dataset Conversion
+======================================================================
+Dataset: /home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot_mvp_50ep
+Robot: so101
+Cameras: Dual
+======================================================================
+
+[1/5] Converting modality.json...
+  📦 Backed up: modality.json.backup
+  ✅ Created: modality.json
+     Cameras: ['front', 'wrist']
+     State dim: 6
+     Action dim: 6
+
+[2/5] Fixing stats.json...
+  📦 Backed up: stats.json.backup
+  ✅ Fixed action: count [1] → [6]
+  ✅ Fixed observation.state: count [1] → [6]
+  ✅ Saved: stats.json (2 fields fixed)
+
+[3/5] Generating episodes.jsonl...
+  ✅ Created: episodes.jsonl
+     Episodes: 50
+     Frames per episode: 150
+     Total frames: 7500
+
+[4/5] Generating tasks.jsonl...
+  ✅ Created: tasks.jsonl
+     Tasks: 1
+     Description: multi_task_manipulation
+
+[5/5] Splitting parquet files...
+  📂 Reading: file-000.parquet
+     Total rows: 7500
+     Episodes: 50
+  ✅ Created: episode_000.parquet (150 frames)
+  ✅ Created: episode_001.parquet (150 frames)
+  ✅ Created: episode_002.parquet (150 frames)
+     ... (+ 47 more files)
+  📦 Backed up: file-000.parquet.original
+
+  💡 TIP: You can delete file-000.parquet to save space
+          The per-episode files contain all the data
+
+======================================================================
+VALIDATION
+======================================================================
+  ✅ info.json            - Original LeRobot metadata
+  ✅ stats.json           - Fixed statistics with per-dimension counts
+  ✅ modality.json        - GR00T format modality mapping
+  ✅ episodes.jsonl       - Episode metadata in JSONL format
+  ✅ tasks.jsonl          - Task metadata in JSONL format
+
+  🎉 All required files present!
+
+  Format checks:
+    ✅ modality.json has GR00T format
+    ✅ stats.json counts match dimensions (6 == 6)
+    ✅ episodes.jsonl has required fields
+    ✅ tasks.jsonl has required fields
+
+======================================================================
+✅ CONVERSION COMPLETE!
+======================================================================
+```
+
+**Verify the conversion:**
+```bash
+# Check parquet files were split correctly
+ls -lh /home/jrobot/project/XLeRobot/jdocs/top_level/${DATASET_NAME}/data/chunk-000/
+# Should show: episode_000.parquet, episode_001.parquet, ..., episode_049.parquet
+
+# Check metadata files
+ls -lh /home/jrobot/project/XLeRobot/jdocs/top_level/${DATASET_NAME}/meta/
+# Should show: info.json, stats.json, modality.json, episodes.jsonl, tasks.jsonl
+```
+
+#### Step 3: Update Training Script Dataset Path
+
+**Edit the MVP training script to point to your new dataset:**
+
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+
+# Open the MVP script
+nano custom/scripts/train_groot_so101_mvp.sh
+# Or use your preferred editor
+```
+
+**Find and update the `DATASET_PATH` variable (around line 20-30):**
+
+```bash
+# Before:
+DATASET_PATH="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot"
+
+# After (update to your dataset name):
+DATASET_PATH="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot_mvp_50ep"
+```
+
+**Alternative: Use environment variable (no script editing needed):**
+
+```bash
+export GROOT_DATASET_PATH="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot_mvp_50ep"
+```
+
+Then modify the script to read this variable:
+```bash
+DATASET_PATH="${GROOT_DATASET_PATH:-/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot}"
+```
+
+#### Step 4: Run MVP Training
+
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+
+# Activate groot environment
+conda activate groot
+
+# Run MVP training (500 steps, ~2 minutes with GR00T's speed)
 bash custom/scripts/train_groot_so101_mvp.sh
 ```
+
+**Expected behavior:**
+- Training starts within 30 seconds
+- Progress bar shows steps/sec (~4-5 it/s)
+- Loss decreases from ~1.2 → ~0.5
+- No CUDA errors, no dataset errors
+- Completes in ~2 minutes (500 steps ÷ 4.3 steps/sec ≈ 115 seconds)
 
 **Configuration:**
 - Steps: 500
 - Batch Size: 8
 - LoRA Rank: 16
 - Learning Rate: 1e-4
-- Duration: ~1-2 hours
-- Expected VRAM: 18-20GB
+- Duration: ~2 minutes (8.5x faster than Pi0.5!)
+- Expected VRAM: 7-10GB
+- Output dir: `/home/jrobot/project/XLeRobot/outputs/groot_mvp_test/`
 
 ### Monitor Training
 
@@ -555,12 +1013,132 @@ Step 500/500 | Loss: 0.548 | VRAM: 19.3GB
 
 ## Full Training (10,000 Steps)
 
-**Prerequisites:**
-- ✅ MVP test passed
-- ✅ 75-100 episodes collected
-- ✅ Dataset converted to GR00T format
+**Prerequisites Checklist:**
+- ✅ MVP test passed (500 steps completed successfully)
+- ✅ 75-100 episodes collected for production dataset
+- ✅ Separate GR00T dataset copy created (e.g., `datasets_groot_full_100ep`)
+- ✅ Dataset converted to GR00T format using conversion script
 
-### Run Full Training
+---
+
+### Workflow Summary
+
+**Quick Reference (Production Training):**
+```bash
+# 1. Copy production dataset (75-100 episodes)
+DATASET_NAME="datasets_groot_full_100ep"
+cp -r datasets/ ${DATASET_NAME}/
+
+# 2. Convert to GR00T format (if new dataset)
+python custom/scripts/convert_lerobot_v3_to_groot.py \
+    --dataset-path /path/to/${DATASET_NAME} \
+    --robot-type so101 --dual-camera
+
+# 3. Update script: Edit train_groot_so101_full.sh
+#    - DATASET_PATH → /path/to/${DATASET_NAME}
+#    - OUTPUT_DIR → outputs/groot_${DATASET_NAME}_v1
+
+# 4. Train (6-8 hours)
+bash custom/scripts/train_groot_so101_full.sh
+```
+
+**Reusability:** This workflow scales to any dataset size or task. Just change `DATASET_NAME` and repeat steps 1-4.
+
+---
+
+### Step-by-Step Full Training Workflow
+
+#### Step 1: Create Production Dataset Copy
+
+**If starting fresh production training:**
+```bash
+cd /home/jrobot/project/XLeRobot/jdocs/top_level
+
+# Create production dataset copy
+DATASET_NAME="datasets_groot_full_100ep"  # Customize for your production run
+cp -r datasets/ ${DATASET_NAME}/
+```
+
+**Dataset Naming Convention (Production):**
+```bash
+datasets_groot_full_100ep      # Full training with 100 episodes
+datasets_groot_full_task1      # Production training for specific task
+datasets_groot_final_deploy    # Final deployment model
+```
+
+**If using existing converted dataset from MVP:**
+```bash
+# Option 1: Continue using MVP dataset if it has enough episodes (75-100)
+DATASET_NAME="datasets_groot_mvp_50ep"  # Reuse if already converted
+
+# Option 2: Create new production dataset with more episodes
+DATASET_NAME="datasets_groot_full_100ep"
+```
+
+#### Step 2: Convert Dataset to GR00T Format (If New)
+
+**Skip this if you're reusing a dataset already converted during MVP testing.**
+
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+conda activate groot
+
+python custom/scripts/convert_lerobot_v3_to_groot.py \
+    --dataset-path /home/jrobot/project/XLeRobot/jdocs/top_level/${DATASET_NAME} \
+    --robot-type so101 \
+    --dual-camera \
+    --task-description "multi_task_manipulation"
+```
+
+**Expected Output:**
+```
+[1/5] Converting modality.json to GR00T format...
+  ✅ Converted modality.json (GR00T format)
+[2/5] Fixing stats.json count fields...
+  ✅ Fixed stats.json
+[3/5] Generating episodes.jsonl...
+  ✅ Generated episodes.jsonl (100 episodes)
+[4/5] Generating tasks.jsonl...
+  ✅ Generated tasks.jsonl (1 task)
+[5/5] Splitting parquet files...
+  ✅ Split 100 episodes into per-episode parquet files
+  ✅ Backup created: data/chunk-000/file-000.parquet.original
+
+✅ Conversion complete!
+```
+
+#### Step 3: Configure Training Script Paths
+
+**Edit the training script to use your dataset:**
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+
+# Edit custom/scripts/train_groot_so101_full.sh
+# Update these two lines (lines 32 and 36):
+
+# DATASET_PATH: Point to your converted GR00T dataset
+#   FROM: DATASET_PATH="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets"
+#   TO:   DATASET_PATH="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot_full_100ep"
+
+# OUTPUT_DIR: Customize output directory for this training run
+#   FROM: OUTPUT_DIR="/home/jrobot/project/XLeRobot/outputs/groot_so101_v1"
+#   TO:   OUTPUT_DIR="/home/jrobot/project/XLeRobot/outputs/groot_full_100ep_v1"
+```
+
+**Output Directory Naming Convention:**
+```bash
+outputs/groot_full_100ep_v1       # Full training, 100 episodes, version 1
+outputs/groot_task1_deploy_v2     # Task-specific, deployment version 2
+outputs/groot_final_20241124      # Final model with date
+```
+
+**Alternative: Override with environment variables:**
+```bash
+export DATASET_PATH="/home/jrobot/project/XLeRobot/jdocs/top_level/${DATASET_NAME}"
+export OUTPUT_DIR="/home/jrobot/project/XLeRobot/outputs/groot_${DATASET_NAME}_v1"
+```
+
+#### Step 4: Run Full Training
 
 ```bash
 cd /home/jrobot/project/Isaac-GR00T
@@ -568,11 +1146,11 @@ cd /home/jrobot/project/Isaac-GR00T
 # Disable wandb if needed
 export WANDB_DISABLED=true
 
-# Run full training
+# Run full training (6-8 hours)
 bash custom/scripts/train_groot_so101_full.sh
 ```
 
-**Configuration:**
+**Training Configuration:**
 - Steps: 10,000
 - Batch Size: 16
 - LoRA Rank: 16
@@ -580,6 +1158,7 @@ bash custom/scripts/train_groot_so101_full.sh
 - Duration: ~6-8 hours
 - Expected VRAM: 18-20GB
 - Checkpoint Frequency: Every 1,000 steps
+- Output: `/home/jrobot/project/XLeRobot/outputs/groot_so101_v1/`
 
 ### Training Timeline
 
@@ -760,19 +1339,98 @@ python /home/jrobot/project/Isaac-GR00T/custom/scripts/convert_lerobot_v3_to_gro
     --dual-camera
 ```
 
-### RTX 5090 sm_120 Warning
+### RTX 5090 CUDA Kernel Error
 
 **Symptoms:**
 ```
+RuntimeError: CUDA error: no kernel image is available for execution on the device
 UserWarning: NVIDIA GeForce RTX 5090 with CUDA capability sm_120 is not compatible
 ```
 
-**Solution:** **Ignore it** - this is just a warning, GPU works perfectly! ✅
+**Root Cause:** PyTorch 2.5.1 doesn't support Blackwell architecture (sm_120)
 
-Verified:
-- CUDA available: True
-- GPU used for training: Confirmed (7GB VRAM allocated)
-- Performance: Normal
+**Solution:** Upgrade to PyTorch 2.10.0 nightly + recompile flash-attn
+
+```bash
+# 1. Upgrade PyTorch
+conda activate groot
+pip install --upgrade --force-reinstall torch torchvision \
+    --index-url https://download.pytorch.org/whl/nightly/cu130
+
+# 2. Fix dependency conflicts
+pip install 'numpy<2.0.0,>=1.23.5' 'typing_extensions==4.12.2'
+
+# 3. Recompile flash-attn for sm_120
+cd /tmp && rm -rf flash-attention
+git clone https://github.com/Dao-AILab/flash-attention.git
+cd flash-attention
+
+# Edit setup.py line 70:
+# From: return os.getenv("FLASH_ATTN_CUDA_ARCHS", "80;90;100;110;120").split(";")
+# To:   return os.getenv("FLASH_ATTN_CUDA_ARCHS", "120").split(";")
+
+pip install . --no-build-isolation --no-cache-dir
+
+# 4. Verify
+python -c "import torch; print(torch.cuda.get_device_capability(0))"  # Should: (12, 0)
+python -c "import flash_attn; print(flash_attn.__version__)"  # Should: 2.8.3
+```
+
+**Time Required:** ~25-30 minutes for flash-attn compilation
+
+### Dataset Parquet File Errors
+
+**Symptoms:**
+```
+FileNotFoundError: .../data/chunk-000/episode_000.parquet
+KeyError: 40  (pandas index access error)
+```
+
+**Root Cause:** GR00T expects per-episode parquet files with reset indices
+
+**Solution:** Split parquet files and reset indices
+
+```python
+import pandas as pd
+from pathlib import Path
+
+dataset_path = Path('/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot')
+data_dir = dataset_path / 'data' / 'chunk-000'
+parquet_file = data_dir / 'file-000.parquet'
+df = pd.read_parquet(parquet_file)
+
+for episode_idx in sorted(df['episode_index'].unique()):
+    episode_df = df[df['episode_index'] == episode_idx].copy()
+    episode_df = episode_df.reset_index(drop=True)  # CRITICAL!
+    output_file = data_dir / f'episode_{episode_idx:03d}.parquet'
+    episode_df.to_parquet(output_file)
+```
+
+**Key Points:**
+- Must have per-episode parquet files (not consolidated chunks)
+- Each episode must have 0-based indices (reset_index)
+- Videos can remain as single files
+
+### TensorBoard vs Wandb
+
+**Symptoms:**
+```
+wandb.errors.UsageError: api_key not configured (no-tty)
+```
+
+**Solution:** Switch to TensorBoard (simpler for local training)
+
+Add `--report-to tensorboard` to training scripts, or:
+
+```bash
+export WANDB_DISABLED=true
+```
+
+**Scripts Updated:**
+- `/home/jrobot/project/XLeRobot/scripts/train_groot_mini_mvp.sh`
+- `/home/jrobot/project/Isaac-GR00T/custom/scripts/train_groot_mini_mvp.sh`
+- `/home/jrobot/project/Isaac-GR00T/custom/scripts/train_groot_so101_mvp.sh`
+- `/home/jrobot/project/Isaac-GR00T/custom/scripts/train_groot_so101_full.sh`
 
 ---
 

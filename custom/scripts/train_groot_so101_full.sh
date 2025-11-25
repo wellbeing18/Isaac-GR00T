@@ -9,6 +9,9 @@
 
 set -e  # Exit on error
 
+# Suppress torchvision video deprecation warnings (harmless, just clutters logs)
+export PYTHONWARNINGS="ignore::UserWarning:torchvision.io"
+
 echo "========================================================================"
 echo "GR00T N1.5 Full Training - SO-101 Left Arm"
 echo "========================================================================"
@@ -166,7 +169,8 @@ python scripts/gr00t_finetune.py \
     --no-tune_diffusion_model \
     --save-steps $SAVE_STEPS \
     --gradient-accumulation-steps 1 \
-    --warmup-ratio 0.05
+    --warmup-ratio 0.05 \
+    --report-to tensorboard
 
 echo ""
 echo "========================================================================"

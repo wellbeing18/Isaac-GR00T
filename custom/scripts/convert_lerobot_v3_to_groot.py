@@ -232,6 +232,80 @@ def generate_tasks_jsonl(dataset_path: Path, task_description: str = "grasp obje
     print(f"     Description: {task_description}")
 
 
+def split_parquet_files(dataset_path: Path) -> None:
+    """
+    Split consolidated parquet file into per-episode files with reset indices.
+
+    This is CRITICAL for GR00T - it expects:
+    - Per-episode parquet files (episode_000.parquet, episode_001.parquet, etc.)
+    - Each episode with 0-based indices (not global indices)
+
+    Args:
+        dataset_path: Path to dataset root
+    """
+    print("\n[5/5] Splitting parquet files...")
+
+    try:
+        import pandas as pd
+    except ImportError:
+        print("  ⚠️  Warning: pandas not installed, skipping parquet splitting")
+        print("     Install with: pip install pandas pyarrow")
+        return
+
+    data_dir = dataset_path / 'data' / 'chunk-000'
+    consolidated_file = data_dir / 'file-000.parquet'
+
+    if not consolidated_file.exists():
+        print(f"  ℹ️  No consolidated file found at {consolidated_file}")
+        print(f"     Checking if files are already split...")
+
+        # Check if already split
+        episode_files = list(data_dir.glob('episode_*.parquet'))
+        if episode_files:
+            print(f"  ✅ Found {len(episode_files)} per-episode parquet files")
+            print(f"     Files already split - no action needed")
+            return
+        else:
+            print(f"  ⚠️  No parquet files found!")
+            return
+
+    print(f"  📂 Reading: {consolidated_file.name}")
+    df = pd.read_parquet(consolidated_file)
+
+    total_rows = len(df)
+    episodes = sorted(df['episode_index'].unique())
+
+    print(f"     Total rows: {total_rows}")
+    print(f"     Episodes: {len(episodes)}")
+
+    # Split by episode
+    split_count = 0
+    for episode_idx in episodes:
+        episode_df = df[df['episode_index'] == episode_idx].copy()
+
+        # CRITICAL: Reset index to 0-based for each episode
+        episode_df = episode_df.reset_index(drop=True)
+
+        output_file = data_dir / f'episode_{episode_idx:03d}.parquet'
+        episode_df.to_parquet(output_file)
+
+        split_count += 1
+        if split_count <= 3 or split_count == len(episodes):
+            print(f"  ✅ Created: {output_file.name} ({len(episode_df)} frames)")
+
+    if split_count > 3:
+        print(f"     ... (+ {split_count - 3} more files)")
+
+    # Optionally backup the original consolidated file
+    backup_consolidated = data_dir / 'file-000.parquet.original'
+    if not backup_consolidated.exists():
+        shutil.copy2(consolidated_file, backup_consolidated)
+        print(f"  📦 Backed up: {backup_consolidated.name}")
+
+    print(f"\n  💡 TIP: You can delete {consolidated_file.name} to save space")
+    print(f"          The per-episode files contain all the data")
+
+
 def validate_conversion(dataset_path: Path) -> bool:
     """
     Validate that all required files exist and are in correct format.
@@ -389,6 +463,7 @@ Examples:
         fix_stats_json(dataset_path)
         generate_episodes_jsonl(dataset_path)
         generate_tasks_jsonl(dataset_path, args.task_description)
+        split_parquet_files(dataset_path)  # CRITICAL: Split parquet for GR00T
 
         # Validate
         success = validate_conversion(dataset_path)

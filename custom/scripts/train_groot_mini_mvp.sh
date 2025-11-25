@@ -8,6 +8,9 @@
 
 set -e  # Exit on error
 
+# Suppress torchvision video deprecation warnings (harmless, just clutters logs)
+export PYTHONWARNINGS="ignore::UserWarning:torchvision.io"
+
 echo "========================================================================"
 echo "GR00T Mini-MVP Pipeline Test - SO-101 Left Arm"
 echo "========================================================================"
@@ -32,7 +35,7 @@ read
 
 # Configuration
 DATASET_PATH_V3="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets"
-DATASET_PATH_V2="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_v2"
+DATASET_PATH_GROOT="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot"
 OUTPUT_DIR="/home/jrobot/project/XLeRobot/outputs/groot_mini_mvp_test"
 ISAAC_GROOT_ROOT="${ISAAC_GROOT_ROOT:-$HOME/project/Isaac-GR00T}"
 
@@ -71,23 +74,18 @@ echo "========================================================================"
 echo "Step 2/6: Dataset Validation"
 echo "========================================================================"
 
-# Check v3 dataset exists
-if [ ! -d "$DATASET_PATH_V3/meta" ]; then
-    echo "❌ ERROR: Dataset not found at $DATASET_PATH_V3"
+# Check GR00T dataset exists
+if [ ! -d "$DATASET_PATH_GROOT/meta" ]; then
+    echo "❌ ERROR: GR00T dataset not found at $DATASET_PATH_GROOT"
+    echo "Run conversion script first to create GR00T-compatible dataset"
     exit 1
 fi
 
-TOTAL_EPISODES=$(python -c "import json; print(json.load(open('$DATASET_PATH_V3/meta/info.json'))['total_episodes'])" 2>/dev/null || echo "0")
-echo "Found v3 dataset: $TOTAL_EPISODES episodes"
+TOTAL_EPISODES=$(python -c "import json; print(json.load(open('$DATASET_PATH_GROOT/meta/info.json'))['total_episodes'])" 2>/dev/null || echo "0")
+echo "Found GR00T dataset: $TOTAL_EPISODES episodes at $DATASET_PATH_GROOT"
+echo "(Original v3 dataset for Pi0.5 preserved at: $DATASET_PATH_V3)"
 
-# Check if v2 conversion already exists
-if [ -d "$DATASET_PATH_V2" ]; then
-    echo "✓ v2 dataset already exists at $DATASET_PATH_V2"
-    DATASET_PATH=$DATASET_PATH_V2
-else
-    echo "⚠️  v2 dataset not found - will use v3 and create modality.json"
-    DATASET_PATH=$DATASET_PATH_V3
-fi
+DATASET_PATH=$DATASET_PATH_GROOT
 
 echo ""
 echo "========================================================================"
@@ -207,6 +205,7 @@ python scripts/gr00t_finetune.py \
     --save-steps 100 \
     --gradient-accumulation-steps 1 \
     --warmup-ratio 0.05 \
+    --report-to tensorboard \
     2>&1 | tee $OUTPUT_DIR/mini_mvp_training.log
 
 TRAINING_EXIT_CODE=$?
