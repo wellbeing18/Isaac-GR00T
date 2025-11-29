@@ -202,17 +202,49 @@ def generate_episodes_jsonl(dataset_path: Path) -> None:
 
 def generate_tasks_jsonl(dataset_path: Path, task_description: str = "grasp object") -> None:
     """
-    Generate tasks.jsonl from info.json.
+    Generate tasks.jsonl from tasks.parquet or info.json.
+
+    In LeRobot v3, task descriptions are stored in tasks.parquet where:
+    - Row index (DataFrame index) = task description string
+    - Column 'task_index' = task index integer
 
     Args:
         dataset_path: Path to dataset root
-        task_description: Description for the task
+        task_description: Fallback description if tasks.parquet is not available
     """
     print("\n[4/4] Generating tasks.jsonl...")
 
-    info_path = dataset_path / "meta" / "info.json"
+    tasks_parquet_path = dataset_path / "meta" / "tasks.parquet"
     tasks_jsonl_path = dataset_path / "meta" / "tasks.jsonl"
+    info_path = dataset_path / "meta" / "info.json"
 
+    # Try to read from tasks.parquet first (LeRobot v3 format)
+    if tasks_parquet_path.exists():
+        try:
+            import pandas as pd
+            df = pd.read_parquet(tasks_parquet_path)
+
+            # In LeRobot v3, the index is the task description and
+            # 'task_index' column contains the index
+            with open(tasks_jsonl_path, 'w') as f:
+                for task_desc, row in df.iterrows():
+                    task_data = {
+                        "task_index": int(row['task_index']),
+                        "task": str(task_desc)
+                    }
+                    f.write(json.dumps(task_data) + '\n')
+
+            print(f"  ✅ Created: {tasks_jsonl_path.name} (from tasks.parquet)")
+            print(f"     Tasks: {len(df)}")
+            for task_desc, row in df.iterrows():
+                print(f"       [{int(row['task_index'])}] {task_desc}")
+            return
+
+        except Exception as e:
+            print(f"  ⚠️  Warning: Failed to read tasks.parquet: {e}")
+            print(f"     Falling back to info.json")
+
+    # Fallback: Generate from info.json with default/provided task description
     if not info_path.exists():
         raise FileNotFoundError(f"Required file not found: {info_path}")
 
@@ -227,7 +259,7 @@ def generate_tasks_jsonl(dataset_path: Path, task_description: str = "grasp obje
             }
             f.write(json.dumps(task_data) + '\n')
 
-    print(f"  ✅ Created: {tasks_jsonl_path.name}")
+    print(f"  ✅ Created: {tasks_jsonl_path.name} (from info.json fallback)")
     print(f"     Tasks: {total_tasks}")
     print(f"     Description: {task_description}")
 
