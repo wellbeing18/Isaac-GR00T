@@ -8,8 +8,14 @@
 
 set -e  # Exit on error
 
-# Suppress torchvision video deprecation warnings (harmless, just clutters logs)
-export PYTHONWARNINGS="ignore::UserWarning:torchvision.io"
+# Suppress Python warnings (harmless, just clutters logs)
+# - torchvision video deprecation warnings
+# - huggingface/transformers warnings
+# - torch dynamo/compile warnings
+export PYTHONWARNINGS="ignore::UserWarning,ignore::FutureWarning,ignore::DeprecationWarning"
+export TORCHVISION_NO_DEPRECATION_WARNING=1
+export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
+export TOKENIZERS_PARALLELISM=false
 
 echo "========================================================================"
 echo "GR00T Mini-MVP Pipeline Test - SO-101 Left Arm"
@@ -36,7 +42,9 @@ read
 # Configuration
 DATASET_PATH_V3="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets"
 DATASET_PATH_GROOT="/home/jrobot/project/XLeRobot/jdocs/top_level/datasets_groot"
-OUTPUT_DIR="/home/jrobot/project/XLeRobot/outputs/groot_mini_mvp_test"
+# Generate unique output directory with datetime (milliseconds precision)
+TIMESTAMP=$(date +%Y%m%d_%H%M%S%3N)
+OUTPUT_DIR="/home/jrobot/project/XLeRobot/outputs/groot_mini_mvp_${TIMESTAMP}"
 ISAAC_GROOT_ROOT="${ISAAC_GROOT_ROOT:-$HOME/project/Isaac-GR00T}"
 
 echo ""
@@ -191,22 +199,43 @@ echo "▶ Training started at $(date)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-python scripts/gr00t_finetune.py \
-    --dataset-path $DATASET_PATH \
-    --output-dir $OUTPUT_DIR \
-    --num-gpus 1 \
-    --max-steps 100 \
-    --batch-size 4 \
-    --learning-rate 1e-4 \
-    --data-config so100_dualcam \
-    --video-backend torchvision_av \
-    --lora-rank 16 \
-    --no-tune_diffusion_model \
-    --save-steps 100 \
-    --gradient-accumulation-steps 1 \
-    --warmup-ratio 0.05 \
-    --report-to tensorboard \
-    2>&1 | tee $OUTPUT_DIR/mini_mvp_training.log
+# Use unbuffer (from expect package) or script to preserve TTY for progress bar
+# Fallback: direct execution with log redirect that preserves terminal output
+if command -v unbuffer &> /dev/null; then
+    unbuffer python -W ignore scripts/gr00t_finetune.py \
+        --dataset-path $DATASET_PATH \
+        --output-dir $OUTPUT_DIR \
+        --num-gpus 1 \
+        --max-steps 100 \
+        --batch-size 4 \
+        --learning-rate 1e-4 \
+        --data-config so100_dualcam \
+        --video-backend torchvision_av \
+        --lora-rank 16 \
+        --no-tune_diffusion_model \
+        --save-steps 100 \
+        --gradient-accumulation-steps 1 \
+        --warmup-ratio 0.05 \
+        --report-to tensorboard \
+        2>&1 | tee $OUTPUT_DIR/mini_mvp_training.log
+else
+    # Direct execution - progress bar shows on terminal, logs captured via script
+    script -q -c "python -W ignore scripts/gr00t_finetune.py \
+        --dataset-path $DATASET_PATH \
+        --output-dir $OUTPUT_DIR \
+        --num-gpus 1 \
+        --max-steps 100 \
+        --batch-size 4 \
+        --learning-rate 1e-4 \
+        --data-config so100_dualcam \
+        --video-backend torchvision_av \
+        --lora-rank 16 \
+        --no-tune_diffusion_model \
+        --save-steps 100 \
+        --gradient-accumulation-steps 1 \
+        --warmup-ratio 0.05 \
+        --report-to tensorboard" $OUTPUT_DIR/mini_mvp_training.log
+fi
 
 TRAINING_EXIT_CODE=$?
 
