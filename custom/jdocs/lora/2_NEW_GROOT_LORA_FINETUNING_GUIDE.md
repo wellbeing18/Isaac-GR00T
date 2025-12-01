@@ -143,16 +143,28 @@ python custom/scripts/convert_lerobot_v3_to_groot.py \
 
 ### Phase 1: Data Preparation
 
+#### Important: Work on a Copy
+
+**Always work on a copy of your original dataset to preserve the raw data:**
+
+```bash
+# Original collected data (DO NOT MODIFY)
+/home/jrobot/project/XLeRobot/datasets
+
+# Working copy for conversion (MODIFY THIS)
+/home/jrobot/project/XLeRobot/datasets copy
+```
+
 #### Option A: Single Dataset Conversion
 
-**Convert LeRobot v3 dataset to GR00T format:**
+**Convert a single LeRobot v3 dataset to GR00T format:**
 
 ```bash
 cd /home/jrobot/project/Isaac-GR00T
 conda activate groot
 
 python custom/scripts/convert_lerobot_v3_to_groot.py \
-    --dataset-path /home/jrobot/project/XLeRobot/datasets \
+    --dataset-path "/path/to/lerobot_dataset" \
     --robot-type so101 \
     --dual-camera \
     --task-description "pick red_cube from center"
@@ -162,50 +174,130 @@ python custom/scripts/convert_lerobot_v3_to_groot.py \
 1. Converts `modality.json` to GR00T format
 2. Fixes `stats.json` count fields (per-dimension)
 3. Generates `episodes.jsonl` from episode metadata
-4. Generates `tasks.jsonl` with task descriptions
+4. Generates `tasks.jsonl` with task descriptions (uses original from tasks.parquet if available)
 5. Splits parquet files into per-episode format with reset indices
 
-**Expected output structure:**
+#### Option B: Multi-Task Dataset (Recommended for 6-Task Training)
+
+This is the workflow we used for the 6-task dataset (grasp, pick, place, push, reach, release).
+
+**Step 1: Copy original dataset to working directory**
+
+```bash
+# Create working copy (preserves original)
+cp -r /home/jrobot/project/XLeRobot/datasets "/home/jrobot/project/XLeRobot/datasets copy"
+```
+
+**Step 2: Convert each task from LeRobot v3 to GR00T format**
+
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+conda activate groot
+
+# Convert each task dataset
+# The script uses task descriptions from tasks.parquet if available
+for task in grasp pick place push reach release; do
+    python custom/scripts/convert_lerobot_v3_to_groot.py \
+        --dataset-path "/home/jrobot/project/XLeRobot/datasets copy/left/$task" \
+        --robot-type so101 \
+        --dual-camera
+done
+```
+
+**Step 3: Combine all tasks into one dataset**
+
+```bash
+python custom/scripts/combine_groot_datasets.py \
+    --datasets \
+        "/home/jrobot/project/XLeRobot/datasets copy/left/grasp" \
+        "/home/jrobot/project/XLeRobot/datasets copy/left/pick" \
+        "/home/jrobot/project/XLeRobot/datasets copy/left/place" \
+        "/home/jrobot/project/XLeRobot/datasets copy/left/push" \
+        "/home/jrobot/project/XLeRobot/datasets copy/left/reach" \
+        "/home/jrobot/project/XLeRobot/datasets copy/left/release" \
+    --output "/home/jrobot/project/XLeRobot/datasets_groot_combined"
+```
+
+**Step 4: Copy videos (combine script doesn't handle LeRobot v3 chunk format)**
+
+```bash
+# The combine script expects flat MP4 files, but LeRobot v3 uses chunk directories
+# Copy videos manually with episode offset
+
+BASE="/home/jrobot/project/XLeRobot/datasets copy/left"
+OUT="/home/jrobot/project/XLeRobot/datasets_groot_combined/videos"
+
+mkdir -p "$OUT/observation.images.head"
+mkdir -p "$OUT/observation.images.left_wrist"
+
+episode_offset=0
+for task in grasp pick place push reach release; do
+    episodes=$(python3 -c "import json; print(json.load(open('$BASE/$task/meta/info.json'))['total_episodes'])")
+
+    for cam in "observation.images.head" "observation.images.left_wrist"; do
+        src_video="$BASE/$task/videos/$cam/chunk-000/file-000.mp4"
+        if [ -f "$src_video" ]; then
+            chunk_dir="$OUT/$cam/chunk-$(printf '%03d' $episode_offset)"
+            mkdir -p "$chunk_dir"
+            cp "$src_video" "$chunk_dir/file-000.mp4"
+        fi
+    done
+
+    episode_offset=$((episode_offset + episodes))
+done
+```
+
+**Step 5: Fix stats.json (combine script may produce incorrect format)**
+
+```bash
+# Copy stats.json from the largest dataset (e.g., pick)
+cp "/home/jrobot/project/XLeRobot/datasets copy/left/pick/meta/stats.json" \
+   "/home/jrobot/project/XLeRobot/datasets_groot_combined/meta/stats.json"
+```
+
+**Step 6: Rename to final location**
+
+```bash
+mv "/home/jrobot/project/XLeRobot/datasets_groot_combined" \
+   "/home/jrobot/project/XLeRobot/datasets_groot"
+```
+
+**Expected Combined Dataset Structure:**
+
 ```
 datasets_groot/
 ├── meta/
-│   ├── info.json           # Dataset info
+│   ├── info.json           # Combined dataset info (68 episodes, 7059 frames, 6 tasks)
 │   ├── modality.json       # GR00T format mapping
 │   ├── stats.json          # Normalization statistics
-│   ├── episodes.jsonl      # Episode metadata
-│   └── tasks.jsonl         # Task descriptions
+│   ├── episodes.jsonl      # 68 episodes with task indices
+│   └── tasks.jsonl         # 6 task descriptions
 ├── data/
-│   ├── episode_000000.parquet
-│   ├── episode_000001.parquet
-│   └── ...
+│   ├── episode_000.parquet # grasp episodes 0-9
+│   ├── episode_010.parquet # pick episodes 10-24
+│   ├── ...
+│   └── episode_067.parquet # release episode 67
 └── videos/
-    ├── observation.images.front_episode_000000.mp4
-    ├── observation.images.wrist_episode_000000.mp4
-    └── ...
+    ├── observation.images.head/
+    │   ├── chunk-000/file-000.mp4  # grasp
+    │   ├── chunk-010/file-000.mp4  # pick
+    │   └── ...
+    └── observation.images.left_wrist/
+        ├── chunk-000/file-000.mp4
+        └── ...
 ```
 
-#### Option B: Multi-Task Dataset Combination
+**Our 6-Task Dataset Summary:**
 
-**Combine multiple GR00T datasets for multi-task training:**
-
-```bash
-# Combine all datasets in a directory
-python custom/scripts/combine_groot_datasets.py \
-    --input-dir /home/jrobot/project/XLeRobot/datasets_groot_tasks \
-    --output /home/jrobot/project/XLeRobot/datasets_groot_combined
-
-# Or combine specific datasets
-python custom/scripts/combine_groot_datasets.py \
-    --datasets /path/to/pick /path/to/place /path/to/push \
-    --output /path/to/combined
-```
-
-**What this does:**
-1. Copies `modality.json` from first dataset
-2. Combines tasks with new indices
-3. Combines statistics (weighted average)
-4. Reindexes episodes
-5. Copies and renames data/video files
+| Task | Episodes | Frames | Task Description |
+|------|----------|--------|------------------|
+| grasp | 10 | 523 | grasp the red cube |
+| pick | 15 | 1870 | pick the red cube from the table |
+| place | 15 | 1904 | place the red cube in the white bowl |
+| push | 10 | 1791 | push the red cube to the green cube |
+| reach | 10 | 756 | reach the red cube |
+| release | 8 | 215 | release |
+| **Total** | **68** | **7059** | **6 tasks** |
 
 ---
 
