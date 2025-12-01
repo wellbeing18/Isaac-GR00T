@@ -88,12 +88,17 @@ Full Training (10,000 steps, ~2 hours)
 
 ### Integrated Training Pipeline ✅
 
-The training script (`train_groot_mini_mvp.sh`) now includes:
+The training scripts now include:
+- `train_groot_mini_mvp.sh` - Quick validation (100 steps, ~5 min)
+- `train_groot_mvp.sh` - Full training (5K steps, ~1 hour) with best checkpoint selection
+
+The MVP script (`train_groot_mvp.sh`) includes:
 1. Pre-training verification
 2. 5000 steps training
 3. Automatic checkpoint evaluation
-4. Inference diagnosis
-5. Comprehensive report generation
+4. Best checkpoint selection (lowest MAE)
+5. Inference diagnosis
+6. Comprehensive report generation
 
 ---
 
@@ -110,12 +115,12 @@ cd /home/jrobot/project/Isaac-GR00T
 python custom/scripts/verify_groot_training_setup.py \
     --dataset /home/jrobot/project/XLeRobot/datasets_groot
 
-# 3. Run 5K training with evaluation
-bash custom/scripts/train_groot_mini_mvp.sh
+# 3. Run 5K training with evaluation (uses train_groot_mvp.sh)
+bash custom/scripts/train_groot_mvp.sh
 
-# 4. Run inference
+# 4. Run inference with best checkpoint
 python custom/scripts/infer_groot_so101.py \
-    --model-path /home/jrobot/project/XLeRobot/outputs/groot_5k_lora_TIMESTAMP \
+    --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_TIMESTAMP/best \
     --task "pick red_cube from center"
 ```
 
@@ -254,11 +259,20 @@ python custom/scripts/verify_groot_training_setup.py \
 
 ### Phase 3: Training
 
+#### Quick Validation (Optional but Recommended)
+
+Run a quick 100-step validation to ensure everything works:
+
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+bash custom/scripts/train_groot_mini_mvp.sh  # 100 steps, ~5 minutes
+```
+
 #### MVP Training (5000 Steps) - Recommended Start
 
 ```bash
 cd /home/jrobot/project/Isaac-GR00T
-bash custom/scripts/train_groot_mini_mvp.sh
+bash custom/scripts/train_groot_mvp.sh  # 5000 steps, ~1 hour
 ```
 
 **Configuration:**
@@ -271,13 +285,27 @@ bash custom/scripts/train_groot_mini_mvp.sh
 | Save Steps | 500 | 10 checkpoints total |
 | VRAM | ~18-20GB | With --no-tune_diffusion_model |
 
-**What the script does:**
+**What the MVP script does:**
 1. **Step 1-2:** Environment check and pre-training verification
 2. **Step 3-4:** Modality.json creation and pre-training checks
 3. **Step 5:** Run 5K LoRA training with TensorBoard logging
 4. **Step 6:** Evaluate all checkpoints (MAE, accuracy)
-5. **Step 7:** Run inference diagnosis
-6. **Step 8:** Generate comprehensive report
+5. **Step 7:** Select best checkpoint (lowest MAE), create `best/` symlink
+6. **Step 8:** Run inference diagnosis on best checkpoint
+7. **Step 9:** Generate comprehensive report
+
+**Output structure:**
+```
+outputs/groot_mvp_lora_TIMESTAMP/
+├── best -> checkpoint-XXXX       # Symlink to best checkpoint
+├── best_info.txt                 # MAE comparison for all checkpoints
+├── checkpoint-500/
+├── checkpoint-1000/
+├── ...
+├── evaluation_results.json
+├── diagnosis_results.json
+└── training_report.txt
+```
 
 **Monitor during training:**
 ```bash
@@ -288,7 +316,7 @@ bash custom/scripts/train_groot_mini_mvp.sh
 watch -n 5 nvidia-smi
 
 # Terminal 3: TensorBoard (optional)
-tensorboard --logdir /home/jrobot/project/XLeRobot/outputs/groot_5k_lora_TIMESTAMP/runs
+tensorboard --logdir /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_TIMESTAMP/runs
 ```
 
 #### Full Training (10000 Steps)
@@ -296,12 +324,12 @@ tensorboard --logdir /home/jrobot/project/XLeRobot/outputs/groot_5k_lora_TIMESTA
 For production models, modify the training script:
 
 ```bash
-# Edit custom/scripts/train_groot_mini_mvp.sh
+# Edit custom/scripts/train_groot_mvp.sh
 # Change: MAX_STEPS=5000
 # To:     MAX_STEPS=10000
 
 # Then run
-bash custom/scripts/train_groot_mini_mvp.sh
+bash custom/scripts/train_groot_mvp.sh
 ```
 
 ---
@@ -453,7 +481,8 @@ All scripts are in `/home/jrobot/project/Isaac-GR00T/custom/scripts/`
 
 | Script | Purpose | Usage |
 |--------|---------|-------|
-| `train_groot_mini_mvp.sh` | Full training pipeline (5K steps) | `bash train_groot_mini_mvp.sh` |
+| `train_groot_mini_mvp.sh` | Quick validation (100 steps) | `bash train_groot_mini_mvp.sh` |
+| `train_groot_mvp.sh` | Full training (5K steps) with best checkpoint | `bash train_groot_mvp.sh` |
 | `verify_groot_training_setup.py` | Pre-training verification | `python verify_groot_training_setup.py --dataset /path` |
 
 ### Evaluation & Diagnosis Scripts
@@ -704,22 +733,25 @@ python custom/scripts/convert_lerobot_v3_to_groot.py \
 python custom/scripts/verify_groot_training_setup.py \
     --dataset /home/jrobot/project/XLeRobot/datasets_groot
 
-# Run 5K training
-bash custom/scripts/train_groot_mini_mvp.sh
+# Run quick validation (optional)
+bash custom/scripts/train_groot_mini_mvp.sh  # 100 steps, ~5 min
 
-# Evaluate checkpoint
+# Run full 5K training
+bash custom/scripts/train_groot_mvp.sh  # 5000 steps, ~1 hour
+
+# Evaluate checkpoint (done automatically by train_groot_mvp.sh)
 python custom/scripts/evaluate_groot_checkpoint.py \
-    --checkpoint /path/to/checkpoint \
+    --checkpoint /path/to/output/best \
     --dataset /home/jrobot/project/XLeRobot/datasets_groot
 
-# Diagnose inference
+# Diagnose inference (done automatically by train_groot_mvp.sh)
 python custom/scripts/diagnose_groot_inference.py \
-    --checkpoint /path/to/checkpoint \
+    --checkpoint /path/to/output/best \
     --dataset /home/jrobot/project/XLeRobot/datasets_groot
 
-# Run inference
+# Run inference with best checkpoint
 python custom/scripts/infer_groot_so101.py \
-    --model-path /path/to/checkpoint \
+    --model-path /path/to/output/best \
     --task "pick red_cube from center"
 
 # Monitor GPU
@@ -728,6 +760,6 @@ watch -n 5 nvidia-smi
 
 ---
 
-**Current Status: LoRA Loading Fixed, Monitoring Scripts Created - Ready for 5K Training! 🎯**
+**Current Status: LoRA Loading Fixed, Monitoring Scripts Created - Ready for 5K Training!**
 
-**Next Action:** Run `bash custom/scripts/train_groot_mini_mvp.sh` to start 5K training with automatic evaluation.
+**Next Action:** Run `bash custom/scripts/train_groot_mvp.sh` to start 5K training with automatic evaluation and best checkpoint selection.
