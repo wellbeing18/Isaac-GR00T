@@ -200,7 +200,7 @@ def generate_episodes_jsonl(dataset_path: Path) -> None:
     print(f"     Total frames: {total_frames}")
 
 
-def generate_tasks_jsonl(dataset_path: Path, task_description: str = "grasp object") -> None:
+def generate_tasks_jsonl(dataset_path: Path, task_description: str = "pick red_cube from center") -> None:
     """
     Generate tasks.jsonl from tasks.parquet or info.json.
 
@@ -449,8 +449,8 @@ Examples:
     parser.add_argument(
         "--task-description",
         type=str,
-        default="grasp object",
-        help="Task description for tasks.jsonl (default: 'grasp object')"
+        default="pick red_cube from center",
+        help="Task description for tasks.jsonl (default: 'pick red_cube from center')"
     )
 
     parser.add_argument(

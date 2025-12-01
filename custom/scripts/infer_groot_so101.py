@@ -10,9 +10,11 @@
 #   python infer_groot_so101.py --help
 
 import argparse
+import json
 import os
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import cv2
 import matplotlib.pyplot as plt
@@ -29,6 +31,159 @@ from gr00t.experiment.data_config import load_data_config
 from gr00t.model.policy import Gr00tPolicy
 
 from tqdm import tqdm
+
+
+#################################################################################
+# LoRA Checkpoint Detection and Loading Utilities
+#################################################################################
+
+
+def is_lora_checkpoint(model_path: str) -> bool:
+    """
+    Detect if the given path is a LoRA (PEFT) checkpoint.
+
+    LoRA checkpoints have:
+    - adapter_config.json (PEFT configuration)
+    - adapter_model.safetensors (LoRA weights only, ~13MB vs ~10GB for full)
+    """
+    model_path = Path(model_path)
+    adapter_config = model_path / "adapter_config.json"
+    adapter_model = model_path / "adapter_model.safetensors"
+
+    return adapter_config.exists() and adapter_model.exists()
+
+
+def get_lora_config(model_path: str) -> dict:
+    """Load and return the PEFT/LoRA configuration."""
+    adapter_config_path = Path(model_path) / "adapter_config.json"
+    with open(adapter_config_path, "r") as f:
+        return json.load(f)
+
+
+def load_groot_with_lora(
+    model_path: str,
+    embodiment_tag: str,
+    modality_config: dict,
+    modality_transform,
+    denoising_steps: int = 4,
+    merge_weights: bool = True,
+) -> Gr00tPolicy:
+    """
+    Load GR00T model with LoRA adapters merged.
+
+    This is the critical fix for Issue #1 from the pre-flight checklist:
+    GR00T training saves PEFT adapters separately, but the standard
+    Gr00tPolicy doesn't load them. This function:
+
+    1. Loads the base GR00T model
+    2. Loads the PEFT LoRA adapter
+    3. Merges LoRA weights into base model (or keeps as adapter)
+    4. Returns a policy ready for inference
+
+    Args:
+        model_path: Path to the LoRA checkpoint (with adapter_config.json)
+        embodiment_tag: Embodiment tag for the model
+        modality_config: Modality configuration
+        modality_transform: Modality transform for normalization
+        denoising_steps: Number of denoising steps
+        merge_weights: If True, merge LoRA into base and unload adapter
+                      If False, keep as PEFT model (uses more memory)
+
+    Returns:
+        Gr00tPolicy with LoRA weights loaded
+    """
+    from peft import PeftModel
+    from gr00t.model.gr00t_n1 import GR00T_N1_5
+
+    model_path = Path(model_path)
+
+    # Load adapter config to get base model path
+    lora_config = get_lora_config(model_path)
+    base_model_path = lora_config.get("base_model_name_or_path")
+
+    print(f"[LoRA] Detected LoRA checkpoint")
+    print(f"[LoRA] Base model: {base_model_path}")
+    print(f"[LoRA] LoRA rank: {lora_config.get('r')}")
+    print(f"[LoRA] LoRA alpha: {lora_config.get('lora_alpha')}")
+    print(f"[LoRA] Target modules: {lora_config.get('target_modules')}")
+
+    # Step 1: Load base GR00T model
+    print(f"[LoRA] Step 1/3: Loading base GR00T model...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+    base_model = GR00T_N1_5.from_pretrained(base_model_path, torch_dtype=compute_dtype)
+    base_model.eval()
+
+    # Step 2: Load PEFT adapter onto base model
+    print(f"[LoRA] Step 2/3: Loading PEFT adapter from {model_path}...")
+    peft_model = PeftModel.from_pretrained(base_model, str(model_path))
+
+    # Step 3: Merge LoRA weights into base weights (optional but recommended)
+    if merge_weights:
+        print(f"[LoRA] Step 3/3: Merging LoRA weights into base model...")
+        merged_model = peft_model.merge_and_unload()
+        print(f"[LoRA] Merge complete! Model is now a standard GR00T model with finetuned weights.")
+    else:
+        merged_model = peft_model
+        print(f"[LoRA] Keeping as PEFT model (adapter mode).")
+
+    # Move to device
+    merged_model.to(device=device)
+
+    # Create a Gr00tPolicy wrapper
+    # We need to manually set up the policy since we're not using from_pretrained
+    policy = Gr00tPolicy.__new__(Gr00tPolicy)
+    policy.device = device
+    policy._modality_config = modality_config
+    policy._modality_transform = modality_transform
+    policy.model = merged_model
+
+    # Set denoising steps
+    policy.model.action_head.num_inference_timesteps = denoising_steps
+
+    # Load metadata for normalization
+    exp_cfg_dir = model_path / "experiment_cfg"
+    if exp_cfg_dir.exists():
+        metadata_path = exp_cfg_dir / "metadata.json"
+        if metadata_path.exists():
+            print(f"[LoRA] Loading normalization metadata from {metadata_path}")
+            with open(metadata_path, "r") as f:
+                metadatas = json.load(f)
+
+            from gr00t.data.dataset import DatasetMetadata
+            from gr00t.model.policy import EmbodimentTag
+
+            # Get embodiment tag enum
+            if isinstance(embodiment_tag, str):
+                embodiment_tag_enum = EmbodimentTag(embodiment_tag)
+            else:
+                embodiment_tag_enum = embodiment_tag
+
+            policy.embodiment_tag = embodiment_tag_enum
+
+            metadata_dict = metadatas.get(embodiment_tag_enum.value)
+            if metadata_dict:
+                metadata = DatasetMetadata.model_validate(metadata_dict)
+                policy._modality_transform.set_metadata(metadata)
+                policy.metadata = metadata
+                print(f"[LoRA] Loaded normalization stats for '{embodiment_tag_enum.value}'")
+            else:
+                print(f"[LoRA] WARNING: No metadata found for embodiment '{embodiment_tag_enum.value}'")
+
+    # Load horizons from modality config
+    policy._video_delta_indices = np.array(modality_config["video"].delta_indices)
+    policy._video_horizon = len(policy._video_delta_indices)
+    if "state" in modality_config:
+        policy._state_delta_indices = np.array(modality_config["state"].delta_indices)
+        policy._state_horizon = len(policy._state_delta_indices)
+    policy._action_delta_indices = np.array(modality_config["action"].delta_indices)
+    policy._action_horizon = len(policy._action_delta_indices)
+
+    print(f"[LoRA] GR00T model with LoRA loaded successfully!")
+    print(f"[LoRA] GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
+
+    return policy
 
 
 #################################################################################
@@ -211,6 +366,10 @@ class SO101Robot:
 class Gr00tLocalInference:
     """
     All-in-one GR00T model loading and inference for SO101 dual-camera setup.
+
+    Automatically detects and handles:
+    - Full model checkpoints (standard Gr00tPolicy loading)
+    - LoRA/PEFT checkpoints (loads adapter and merges weights)
     """
 
     def __init__(
@@ -234,14 +393,34 @@ class Gr00tLocalInference:
         modality_config = data_cfg.modality_config()
         modality_transform = data_cfg.transform()
 
-        # Load the policy
-        self.policy = Gr00tPolicy(
-            model_path=model_path,
-            embodiment_tag=embodiment_tag,
-            modality_config=modality_config,
-            modality_transform=modality_transform,
-            denoising_steps=denoising_steps,
-        )
+        # Auto-detect checkpoint type and load appropriately
+        if is_lora_checkpoint(model_path):
+            print(f"\n{'='*60}")
+            print(f"[INFO] Detected LoRA checkpoint - using PEFT adapter loading")
+            print(f"{'='*60}\n")
+
+            # Use our custom LoRA loading function
+            self.policy = load_groot_with_lora(
+                model_path=model_path,
+                embodiment_tag=embodiment_tag,
+                modality_config=modality_config,
+                modality_transform=modality_transform,
+                denoising_steps=denoising_steps,
+                merge_weights=True,  # Merge LoRA into base for efficient inference
+            )
+        else:
+            print(f"\n{'='*60}")
+            print(f"[INFO] Full checkpoint detected - using standard loading")
+            print(f"{'='*60}\n")
+
+            # Standard loading for full checkpoints
+            self.policy = Gr00tPolicy(
+                model_path=model_path,
+                embodiment_tag=embodiment_tag,
+                modality_config=modality_config,
+                modality_transform=modality_transform,
+                denoising_steps=denoising_steps,
+            )
 
         print(f"Model loaded successfully! Denoising steps: {denoising_steps}")
 
