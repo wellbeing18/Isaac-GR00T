@@ -1,16 +1,14 @@
-The linter errors (numpy import, float.tolist) are minor type checking issues that won't affect runtime in this environment where numpy is installed (as seen in other files).
-I have now:
-Fixed convert_lerobot_v3_to_groot.py:
-Updated generate_episodes_jsonl to include task_index in the episode metadata, reading it from the parquet source if available, or defaulting to 0. This fixes the "Missing task_index" issue reported by Claude.
-Fixed combine_groot_datasets.py:
-Rewrote the combination logic to preserve the "Chunked" structure of LeRobot datasets.
-Instead of flattening everything to episode_XXX, it now calculates chunk_offset based on chunk_size (preserving alignment).
-It moves parquet files to data/chunk-{new_chunk}/episode_{new_ep}.parquet.
-It moves video files to videos/{key}/chunk-{new_chunk}/....
-This avoids the need to re-encode/split video files, as we simply shift the chunks to new indices.
-Updated info.json to use the chunked data_path and video_path patterns.
+now we are encountering the road blocks of after custom/scripts/train_groot_mvp.sh 5k step finetuning(you can reference custom/jdocs/lora/2_NEW_GROOT_LORA_FINETUNING_GUIDE.md for more details), we get really bad robot arm so101 inference performance. we are facing the issue that, though the training metric(loss), evaluation results(mae) looks good, but the actual inference is really bad. from previous investigation we have spotted some possible reasons, like the async of model output and robot arm execution, the messed up camera input like in eval_images/img_01198.jpg, the unreset arm initial state/position, etc. but we still didnt' find a sound explanation to systematically explain the issue, most suggestions are more like guessing and assumptions which I don't like at all. 
 
+so you need to systematically redo a new investigation according to requirements and rules as below:
+1) rule: the investigation and analysis should be facts feedback based. meaning if you assume anything, you need to setup experiment like generate logs or analysis data specific to the assumptions, create tools/scripts to help, etc. the key idea is to probe black box problem by either walking through the interior mechanisms to make black box into white box, or creating probes which expose internel mechanisms in terms of the input, output, logs data, which can be used for investigation, prove or disapprove assumptions. so that we can iterate step by step to the true problem instead of going around and around as our investigations are building on assumptions before.
+2) need to generate the detailed process diagrams(mermaid) which clearly mirror each steps of inference, and use collected inputs/outputs/logs of each step to paint the whole picture, thinking on picture, narrow down to the true issue place. you could need to review to add or modifies those inputs/outputs/logs if required.
+3) further detailed the explanation of how evaluation(open loop and checkpoint works, and use generated image/result to explain to me while it looks good for evaluation, you can reference the method of openloop to explain to the evaluation results visually). why evaluation is good but robot arm inference is bad, to me they share large parts, the difference is mostly in the part from model's output to robot arm execution, if that is the case, you could need to check https://xlerobot.readthedocs.io/en/latest/software/getting_started/RL_VLA.html#vision-language-action-vla-training-for-xlerobot for parts it suggests on how to synchronize model and arm, and think carefully above and propose what we should do if this is the right direction.
+4) research and search more to pin the real issue: 
+- https://xlerobot.readthedocs.io/en/latest/software/getting_started/RL_VLA.html#vision-language-action-vla-training-for-xlerobot
+- https://github.com/NVIDIA/Isaac-GR00T/tree/main/getting_started
+- https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning?ncid=so-yout-577961-vt48
+- https://huggingface.co/blog/lerobotxnvidia-healthcare
+- and more research you need to do yourself
 
-python custom/scripts/infer_groot_so101.py \
-      --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251204_215410259/best \
-      --task "pick the red cube from the table"
+finally write your analysis and plans into doc: custom/jdocs/lora/3_inference_issue_investigation_20251206.md

@@ -204,11 +204,10 @@ git remote -v
 # origin  https://github.com/huggingface/lerobot.git (fetch)
 # origin  https://github.com/huggingface/lerobot.git (push)
 
-# Add your fork as a new remote called 'myfork'
-git remote add myfork https://github.com/YOUR_USERNAME/lerobot.git
+git remote rename origin upstream
 
 # Or if you use SSH:
-git remote add myfork git@github.com:YOUR_USERNAME/lerobot.git
+git remote add origin git@github.com:wellbeing18/lerobot.git
 
 # Verify
 git remote -v

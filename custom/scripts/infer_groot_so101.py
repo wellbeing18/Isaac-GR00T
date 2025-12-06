@@ -40,6 +40,54 @@ from tqdm import tqdm
 
 
 #################################################################################
+# Camera Quality Check Utility (for diagnostic mode)
+#################################################################################
+
+
+def check_camera_quality(frame: np.ndarray, black_threshold: int = 10) -> dict:
+    """
+    Check camera frame quality for corruption detection.
+
+    Returns dict with:
+    - is_corrupt: bool
+    - corruption_score: float (0-1, higher = more corruption)
+    - black_row_count: int
+    - mean_brightness: float
+    """
+    if frame is None or frame.size == 0:
+        return {
+            "is_corrupt": True,
+            "corruption_score": 1.0,
+            "black_row_count": 0,
+            "mean_brightness": 0.0,
+        }
+
+    # Convert to grayscale for analysis
+    if len(frame.shape) == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) if frame.shape[2] == 3 else frame[:, :, 0]
+    else:
+        gray = frame
+
+    # Find rows that are mostly black (potential corruption)
+    row_means = np.mean(gray, axis=1)
+    black_rows = int(np.sum(row_means < black_threshold))
+
+    # Calculate corruption score
+    total_rows = gray.shape[0]
+    corruption_score = black_rows / total_rows
+
+    # Consider corrupt if more than 5% of rows are black
+    is_corrupt = corruption_score > 0.05
+
+    return {
+        "is_corrupt": is_corrupt,
+        "corruption_score": float(corruption_score),
+        "black_row_count": black_rows,
+        "mean_brightness": float(np.mean(gray)),
+    }
+
+
+#################################################################################
 # LoRA Checkpoint Detection and Loading Utilities
 #################################################################################
 
@@ -634,7 +682,39 @@ def main():
         help="Move robot to home position before starting inference (use if robot is in unknown state)",
     )
 
+    # Diagnostic mode
+    parser.add_argument(
+        "--diagnostic-mode",
+        action="store_true",
+        help="Enable comprehensive diagnostic logging (saves timing, states, actions to JSON)",
+    )
+    parser.add_argument(
+        "--diagnostic-output",
+        type=str,
+        default="diagnostic_output",
+        help="Directory for diagnostic output files (default: diagnostic_output)",
+    )
+
     args = parser.parse_args()
+
+    # Setup diagnostic mode data structures
+    diagnostic_data = None
+    if args.diagnostic_mode:
+        os.makedirs(args.diagnostic_output, exist_ok=True)
+        diagnostic_data = {
+            "config": {
+                "model_path": args.model_path,
+                "action_horizon": args.action_horizon,
+                "action_interval": args.action_interval,
+                "denoising_steps": args.denoising_steps,
+                "task": args.task,
+            },
+            "timing": [],
+            "states": [],
+            "actions": [],
+            "camera_metrics": [],
+        }
+        print(f"[DIAGNOSTIC] Mode enabled. Output: {args.diagnostic_output}")
 
     # Setup logging to file if requested
     log_file = None
@@ -755,8 +835,34 @@ def main():
             
             for chunk_idx in tqdm(range(args.actions_to_execute), desc="Executing action chunks"):
                 # Get observations
+                obs_start = time.time()
                 head_img, wrist_img = robot.get_dual_images()
                 state = robot.get_current_state()
+                obs_time = time.time() - obs_start
+
+                # Diagnostic: Check camera quality
+                if diagnostic_data is not None:
+                    head_quality = check_camera_quality(head_img)
+                    wrist_quality = check_camera_quality(wrist_img)
+                    diagnostic_data["camera_metrics"].append({
+                        "chunk": chunk_idx,
+                        "timestamp": time.time(),
+                        "head": head_quality,
+                        "wrist": wrist_quality,
+                        "obs_time_ms": obs_time * 1000,
+                    })
+                    # Alert on corruption
+                    if head_quality["is_corrupt"] or wrist_quality["is_corrupt"]:
+                        print(f"\n[DIAGNOSTIC] Camera corruption detected at chunk {chunk_idx}!")
+                        if head_quality["is_corrupt"]:
+                            print(f"  Head: score={head_quality['corruption_score']:.2f}, black_rows={head_quality['black_row_count']}")
+                        if wrist_quality["is_corrupt"]:
+                            print(f"  Wrist: score={wrist_quality['corruption_score']:.2f}, black_rows={wrist_quality['black_row_count']}")
+                        # Save corrupt frame
+                        cv2.imwrite(
+                            f"{args.diagnostic_output}/corrupt_head_{chunk_idx:05d}.jpg",
+                            cv2.cvtColor(head_img, cv2.COLOR_RGB2BGR)
+                        )
 
                 # Record first image to verify camera mapping
                 if chunk_idx == 0 and args.record_imgs:
@@ -772,6 +878,18 @@ def main():
                 start_time = time.time()
                 action = inference.get_action(head_img, wrist_img, state)
                 inference_time = time.time() - start_time
+
+                # Diagnostic: Record timing and state/action data
+                if diagnostic_data is not None:
+                    diagnostic_data["timing"].append({
+                        "chunk": chunk_idx,
+                        "obs_time_ms": obs_time * 1000,
+                        "inference_time_ms": inference_time * 1000,
+                    })
+                    diagnostic_data["states"].append({
+                        "chunk": chunk_idx,
+                        "state": state.tolist(),
+                    })
 
                 # Construct full action array for this chunk
                 # Shape: (action_horizon, 6)
@@ -792,6 +910,14 @@ def main():
                     current_action_chunk[0] = alpha * current_action_chunk[0] + (1-alpha) * prev_action_chunk[-1]
                 
                 prev_action_chunk = current_action_chunk
+
+                # Diagnostic: Record predicted actions
+                if diagnostic_data is not None:
+                    diagnostic_data["actions"].append({
+                        "chunk": chunk_idx,
+                        "predicted_action_0": current_action_chunk[0].tolist(),
+                        "predicted_action_full": current_action_chunk.tolist(),
+                    })
 
                 # Print debug info for first chunk or every 10th chunk
                 if chunk_idx == 0 or chunk_idx % 10 == 0:
@@ -862,6 +988,46 @@ def main():
     print("\nInference complete!")
     if args.record_imgs:
         print(f"Recorded {image_count} images to eval_images/")
+
+    # Save diagnostic data
+    if diagnostic_data is not None:
+        # Calculate summary statistics
+        timing_data = diagnostic_data["timing"]
+        if timing_data:
+            obs_times = [t["obs_time_ms"] for t in timing_data]
+            inf_times = [t["inference_time_ms"] for t in timing_data]
+            diagnostic_data["summary"] = {
+                "total_chunks": len(timing_data),
+                "obs_time_mean_ms": float(np.mean(obs_times)),
+                "obs_time_max_ms": float(np.max(obs_times)),
+                "inference_time_mean_ms": float(np.mean(inf_times)),
+                "inference_time_max_ms": float(np.max(inf_times)),
+            }
+
+        camera_data = diagnostic_data["camera_metrics"]
+        if camera_data:
+            corrupt_count = sum(1 for c in camera_data if c["head"]["is_corrupt"] or c["wrist"]["is_corrupt"])
+            diagnostic_data["summary"]["camera_corrupt_count"] = corrupt_count
+            diagnostic_data["summary"]["camera_corruption_rate"] = corrupt_count / len(camera_data)
+
+        # Save to JSON
+        output_path = os.path.join(args.diagnostic_output, "diagnostic_results.json")
+        with open(output_path, "w") as f:
+            json.dump(diagnostic_data, f, indent=2)
+        print(f"\n[DIAGNOSTIC] Results saved to: {output_path}")
+
+        # Print summary
+        print("\n" + "="*60)
+        print("DIAGNOSTIC SUMMARY")
+        print("="*60)
+        summary = diagnostic_data.get("summary", {})
+        print(f"  Total chunks:           {summary.get('total_chunks', 0)}")
+        print(f"  Obs time (mean):        {summary.get('obs_time_mean_ms', 0):.1f}ms")
+        print(f"  Obs time (max):         {summary.get('obs_time_max_ms', 0):.1f}ms")
+        print(f"  Inference time (mean):  {summary.get('inference_time_mean_ms', 0):.1f}ms")
+        print(f"  Inference time (max):   {summary.get('inference_time_max_ms', 0):.1f}ms")
+        print(f"  Camera corruptions:     {summary.get('camera_corrupt_count', 0)} ({summary.get('camera_corruption_rate', 0)*100:.1f}%)")
+        print("="*60)
 
 
 if __name__ == "__main__":

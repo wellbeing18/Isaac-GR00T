@@ -1,29 +1,29 @@
-
-import os
 import cv2
 import numpy as np
+import os
 
-def analyze_image(path, name):
-    if not os.path.exists(path):
-        print(f"❌ {name} not found at {path}")
-        return
-    
-    img = cv2.imread(path)
+image_path = "eval_images/img_01198.jpg"
+
+if not os.path.exists(image_path):
+    print(f"Image {image_path} not found.")
+else:
+    img = cv2.imread(image_path)
     if img is None:
-        print(f"❌ Failed to load {name}")
-        return
-
-    h, w, c = img.shape
-    mean_brightness = np.mean(img)
-    laplacian_var = cv2.Laplacian(img, cv2.CV_64F).var()
-    
-    print(f"✅ {name}:")
-    print(f"   Dimensions: {w}x{h}")
-    print(f"   Mean Brightness: {mean_brightness:.1f}")
-    print(f"   Blur Score (Laplacian Var): {laplacian_var:.1f} (Lower = More Blurred, <100 is usually blurry)")
-    
-    # Simple check for black images
-    if mean_brightness < 5:
-        print(f"  ⚠️  WARNING: {name} is very dark/black!")
-
-analyze_image("/home/jrobot/project/Isaac-GR00T/eval_images/img_01192.jpg", "User Provided Image")
+        print("Failed to load image.")
+    else:
+        print(f"Image shape: {img.shape}")
+        print(f"Mean brightness: {np.mean(img)}")
+        
+        # Check for black rows (corruption)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        row_means = np.mean(gray, axis=1)
+        black_rows = np.sum(row_means < 10)
+        print(f"Black rows (mean < 10): {black_rows}")
+        
+        if black_rows > 0:
+            print("Potential corruption detected: Horizontal black banding.")
+            
+            # Print distribution of black rows
+            black_indices = np.where(row_means < 10)[0]
+            print(f"Black row indices (first 10): {black_indices[:10]}")
+            print(f"Black row indices (last 10): {black_indices[-10:]}")
