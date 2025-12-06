@@ -27,7 +27,41 @@ After 5K step LoRA finetuning:
 - **Real robot inference**: Poor performance (jerky, inaccurate movements)
 
 ### Key Finding
-**The evaluation pipeline and inference pipeline are fundamentally different**, leading to a false sense of model quality.
+**The model is likely fine; the inference script is driving it poorly.** (Loss 0.028 indicates learning)
+
+The primary issues are:
+1. **Software architecture** - Blocking loop causes 27% dead time
+2. **Parameter mismatch** - Our timing differs 2.5x from NVIDIA reference
+3. **Missing async pattern** - NVIDIA uses client-server, we use monolithic blocking
+
+### NVIDIA Reference vs Our Implementation
+
+**Source**: `examples/SO-100/eval_lerobot.py` and `getting_started/5_policy_deployment.md`
+
+| Parameter | NVIDIA Reference | Our Implementation | Impact |
+|-----------|------------------|-------------------|--------|
+| action_horizon | **8** | 12 | 50% more actions per chunk |
+| action_interval | **20ms** (50Hz) | 33ms (30Hz) | 65% slower execution |
+| execution time | **160ms** | 396ms | **2.5x longer cycle!** |
+| architecture | **Client-Server** | Monolithic blocking | No async benefit |
+| control frequency | **~4.5 Hz** | ~1.8 Hz | 2.5x slower response |
+
+**NVIDIA's Recommended Architecture** (from `5_policy_deployment.md`):
+```bash
+# Terminal 1: Inference server (runs continuously, async)
+python scripts/inference_service.py --server --model_path <checkpoint>
+
+# Terminal 2: Execution client (fetches predictions, executes at 50Hz)
+python eval_lerobot.py --action_horizon 8  # Uses 20ms sleep
+```
+
+This client-server pattern is **inherently async** - inference runs in parallel with execution.
+
+### Root Cause Summary
+The `infer_groot_so101.py` was built as a self-contained script but deviated from NVIDIA's reference:
+- Changed timing without changing architecture
+- Lost async benefit of client-server separation
+- Result: 27% dead time + 2.5x slower control loop
 
 | Aspect | Evaluation (Open-Loop) | Real Inference (Closed-Loop) |
 |--------|------------------------|------------------------------|
@@ -245,6 +279,51 @@ This explains why the robot drifts significantly during inference!
 
 ## Identified Issues
 
+### Issue 0: Blocking "Stop-and-Go" Architecture (CRITICAL - From Gemini Analysis)
+
+The current inference loop has a **structural flaw** that causes jerky motion regardless of model quality:
+
+```mermaid
+sequenceDiagram
+    participant R as Robot Hardware
+    participant S as Script (CPU)
+    participant G as GPU (Model)
+
+    Note over R, G: Cycle N starts
+    R->>S: State + Images (t=0ms)
+    Note over S: Preprocess (~5ms)
+    S->>G: Inference Request
+    Note over G: Inference (~150ms)
+    G->>S: 16 Action Preds (t=155ms)
+
+    Note over S: Robot has been IDLE for 155ms!
+
+    loop Execute 12 Actions (396ms)
+        S->>R: Send Action (t=155ms)
+        R-->>S: Move
+        Note right of S: Sleep 33ms
+    end
+
+    Note over R, G: Cycle N+1 starts (t=551ms)
+    Note over R: Robot IDLE again during next inference
+```
+
+**Dead Time Calculation**:
+- Inference time: ~150ms
+- Execution time: 12 × 33ms = 396ms
+- Total cycle: ~550ms
+- **Dead time duty cycle: 150/(150+396) = 27%**
+
+The robot physically **stops** for 27% of the time, creating visible jerky motion.
+
+**Comparison with NVIDIA Reference**:
+| Metric | Our Implementation | NVIDIA Reference |
+|--------|-------------------|------------------|
+| Action horizon | 12 | 8 |
+| Action interval | 33ms (30Hz) | 20ms (50Hz) |
+| Execution time | 396ms | 160ms |
+| Control frequency | ~1.8 Hz | ~4.5 Hz |
+
 ### Issue 1: Camera Corruption During Inference (CRITICAL)
 
 **Evidence**: `eval_images/img_01198.jpg` shows severe horizontal black banding
@@ -328,7 +407,47 @@ pie title Per-Joint MSE Distribution
     "gripper" : 52
 ```
 
-### Issue 4: Denoising Steps (MEDIUM)
+### Issue 4: Weak Temporal Ensembling (HIGH - From Gemini Analysis)
+
+**Current Implementation** (lines 908-910 in `infer_groot_so101.py`):
+```python
+if prev_action_chunk is not None:
+    # Only smooths the transition point (Step 0)
+    current_action_chunk[0] = 0.8 * current_action_chunk[0] + 0.2 * prev_action_chunk[-1]
+```
+
+This is **weak** because:
+- Only Step 0 is smoothed
+- 93% of model predictions (15/16 steps) are discarded each cycle
+- No averaging of overlapping predictions
+
+**Proper ACT/Diffusion Policy Implementation**:
+
+```mermaid
+gantt
+    title Sliding Window Ensembling (Industry Standard)
+    dateFormat X
+    axisFormat %L
+
+    section Inference 1
+    Predict T0-T15 :active, 0, 500
+    section Inference 2
+    Predict T8-T23 :active, 250, 750
+    section Inference 3
+    Predict T16-T31 :active, 500, 1000
+
+    section Execution
+    Exec T8 (Avg Inf1+Inf2) :crit, 250, 280
+    Exec T16 (Avg Inf1+Inf2+Inf3) :crit, 500, 530
+```
+
+**Standard Approach**:
+- Inference every 8 steps (not 12)
+- Keep 8-step overlap window
+- Action at step T = average of all predictions for T
+- Reduces variance by √N factor
+
+### Issue 5: Denoising Steps (MEDIUM)
 
 Current: 4 denoising steps (fast but noisy)
 Recommended: 16+ for smooth motion
@@ -349,7 +468,129 @@ flowchart LR
 
 ---
 
-## Diagnostic Experiments
+## Diagnostic Test Steps (Run in Order)
+
+### Step 1: Async Throughput Test (5 minutes) ⭐ START HERE
+
+> **Why this first?** Before implementing async architecture, verify GPU can sustain the required throughput.
+> This test determines whether async is viable or if you need TensorRT optimization first.
+
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+
+# Test if GPU can sustain async inference
+python custom/scripts/diagnose_async_throughput.py \
+    --model-path /path/to/checkpoint \
+    --duration 30 \
+    --simulate-async
+```
+
+**Key Metrics**:
+- **Producer rate >15 Hz**: ✅ Async architecture is viable → Proceed to implement `infer_groot_async.py`
+- **Producer rate 8-15 Hz**: ⚠️ Marginal, async may help but consider TensorRT
+- **Producer rate <8 Hz**: ❌ Need TensorRT optimization first
+
+---
+
+### Step 2: Camera Corruption Test (10 minutes)
+
+```bash
+# Test 1: Baseline (no GPU load)
+python custom/scripts/diagnose_camera_sync.py \
+    --head-cam-idx 4 \
+    --wrist-cam-idx 6 \
+    --num-frames 100
+
+# Test 2: With GPU load
+python custom/scripts/diagnose_camera_sync.py \
+    --head-cam-idx 4 \
+    --wrist-cam-idx 6 \
+    --num-frames 100 \
+    --with-gpu-load
+
+# Test 3: With actual model (most realistic)
+python custom/scripts/diagnose_camera_sync.py \
+    --head-cam-idx 4 \
+    --wrist-cam-idx 6 \
+    --with-model \
+    --model-path /path/to/checkpoint
+```
+
+**Expected Results**:
+| Condition | Corrupt Frames | Latency Variance |
+|-----------|----------------|------------------|
+| No GPU | 0% | Low (±2ms) |
+| With GPU | >5% | High (±40ms) |
+
+**If corruption increases with GPU load** → USB contention confirmed.
+
+---
+
+### Step 3: Closed-Loop Simulation (10 minutes)
+
+```bash
+# Simulate error accumulation
+python custom/scripts/diagnose_closed_loop_sim.py \
+    --checkpoint /path/to/checkpoint \
+    --dataset /home/jrobot/project/XLeRobot/datasets_groot \
+    --steps 100 \
+    --save-plot closedloop_sim.png
+```
+
+**Expected Results**:
+| Metric | Value | Interpretation |
+|--------|-------|----------------|
+| Closed/Open MSE ratio | <2x | Model robust to errors |
+| Closed/Open MSE ratio | 2-5x | Moderate accumulation |
+| Closed/Open MSE ratio | >5x | Severe accumulation |
+
+---
+
+### Step 4: Timing Analysis (5 minutes)
+
+```bash
+# Profile full pipeline timing
+python custom/scripts/diagnose_timing_analysis.py \
+    --model-path /path/to/checkpoint \
+    --num-iterations 50
+
+# With real robot (optional)
+python custom/scripts/diagnose_timing_analysis.py \
+    --model-path /path/to/checkpoint \
+    --with-robot \
+    --port /dev/ttyACM2
+```
+
+**Key Metrics**:
+- **Inference time**: Should be <200ms
+- **Dead time %**: 150ms / (150ms + exec_time)
+- **Camera variance**: High max indicates USB issues
+
+---
+
+### Step 5: Real Robot Diagnostic Run (15 minutes)
+
+```bash
+# Run with full diagnostics enabled
+python custom/scripts/infer_groot_so101.py \
+    --model-path /path/to/checkpoint \
+    --diagnostic-mode \
+    --diagnostic-output diagnostic_run_001 \
+    --go-home-first \
+    --actions-to-execute 50
+
+# Review results
+cat diagnostic_run_001/diagnostic_results.json
+```
+
+**Check for**:
+- Camera corruption count
+- Timing consistency
+- State drift patterns
+
+---
+
+## Diagnostic Experiments (Detailed)
 
 ### Experiment 1: Camera Corruption Diagnosis
 
@@ -530,31 +771,79 @@ flowchart TB
    python infer_groot_so101.py --denoising-steps 16
    ```
 
-2. **Match NVIDIA timing: 8 actions × 20ms**
-   ```bash
-   python infer_groot_so101.py --action-horizon 8 --action-interval 0.02
+2. **Always use `--go-home-first`** to start from known state
+
+3. ⚠️ **DO NOT reduce action_horizon/interval yet** (See warning below)
+
+> **⚠️ CRITICAL WARNING (From Gemini Review - doc #5)**
+>
+> Switching to NVIDIA's timing (8×20ms) **without** async architecture will make things **WORSE**:
+>
+> | Setup | Inference | Execution | Total | Dead Time |
+> |-------|-----------|-----------|-------|-----------|
+> | Current (12×33ms blocking) | 150ms | 396ms | 546ms | **27%** |
+> | NVIDIA (8×20ms blocking) | 150ms | 160ms | 310ms | **48%** ← WORSE! |
+>
+> The dead time **increases** because inference (~150ms) stays constant while execution time shrinks.
+> NVIDIA's timing works because they use **async client-server architecture** where inference runs in parallel.
+>
+> **You MUST implement async architecture BEFORE adopting NVIDIA timing parameters.**
+
+### HIGH PRIORITY: Implement Async Architecture FIRST
+
+4. **Implement Async "Pipelined" Architecture** (PREREQUISITE for NVIDIA timing)
+
+   The XLeRobot documentation explicitly recommends async architecture for "powerful policies" like GR00T.
+
+   ```mermaid
+   flowchart LR
+       subgraph Producer["Thread 1: Vision/Model"]
+           P1["Capture Images"] --> P2["Run Inference"] --> P3["Push to Queue"]
+           P3 --> P1
+       end
+
+       subgraph Queue["Action Queue"]
+           Q1["Latest Prediction"]
+       end
+
+       subgraph Consumer["Thread 2: Control (30Hz)"]
+           C1["Pop from Queue"] --> C2["Interpolate"] --> C3["Send to Robot"]
+           C3 --> C1
+       end
+
+       P3 --> Q1
+       Q1 --> C1
    ```
 
-3. **Always use `--go-home-first`** to start from known state
+   Benefits:
+   - Eliminates 27% dead time
+   - Robot never stops moving
+   - Fresh predictions for every control cycle
 
-### Medium-Term Fixes
+   Use `diagnose_async_throughput.py` to verify feasibility first.
 
-4. **Fix camera corruption**
+5. **Fix camera corruption**
    - Use separate USB controllers for cameras
    - Implement frame validation before inference
    - Add camera buffering/queue
 
-5. **Implement proper temporal ensembling**
-   - Current: simple EMA with α=0.8
-   - Better: ACT-style chunking with weighted averaging
+6. **Implement proper sliding window ensembling**
+   - Inference every 8 steps (not 12)
+   - Overlap: 8 steps
+   - Average predictions: Action[T] = 0.5 × Pred[T]^Inf1 + 0.5 × Pred[T]^Inf2
 
 ### Long-Term Improvements
 
-6. **Closed-loop training** (if possible)
+7. **TensorRT Optimization**
+   - If async throughput test shows <15 Hz, model is too slow
+   - Use `deployment_scripts/` to build TensorRT engines
+   - Can achieve 3-5x speedup
+
+8. **Closed-loop training** (if possible)
    - Train with simulated error injection
    - Make model robust to state perturbations
 
-7. **State estimation**
+9. **State estimation**
    - Use Kalman filter to smooth state readings
    - Detect and reject outlier states
 
@@ -565,9 +854,12 @@ flowchart TB
 | File | Purpose |
 |------|---------|
 | `custom/jdocs/lora/3_inference_issue_investigation_20251206.md` | This document |
+| `custom/jdocs/lora/4_gemini_inference_issue_investigation_20251206.md` | Gemini's analysis (complementary) |
 | `custom/scripts/diagnose_camera_sync.py` | Camera corruption diagnosis |
 | `custom/scripts/diagnose_timing_analysis.py` | Pipeline timing analysis |
 | `custom/scripts/diagnose_closed_loop_sim.py` | Error accumulation simulation |
+| `custom/scripts/diagnose_async_throughput.py` | Async architecture feasibility test |
+| `custom/scripts/infer_groot_so101.py` | Modified with `--diagnostic-mode` flag |
 
 ---
 
