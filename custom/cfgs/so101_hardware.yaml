@@ -1,0 +1,149 @@
+# SO101 Robot Hardware Configuration
+# ===================================
+# This file centralizes all hardware-specific settings for the SO101 robot setup.
+# Update this file when USB connections change.
+#
+# Last updated: 2025-12-06
+# USB topology verified with: lsusb -t && v4l2-ctl --list-devices
+
+# =============================================================================
+# ROBOT ARMS
+# =============================================================================
+# Serial ports for robot arm motor controllers (Feetech servos via USB-serial)
+# Both arms are connected through USB hub on Bus 003 Port 004
+
+robot_arms:
+  left:
+    # Left arm (follower) - currently ACTIVE
+    port: "/dev/ttyACM0"
+    usb_path: "3-4.1.1"  # Bus 3, Port 4 → Hub Port 1 → Sub-port 1
+    robot_id: "xlerobot_left_arm"
+    use_degrees: true
+
+  right:
+    # Right arm - currently NOT USED
+    port: "/dev/ttyACM1"
+    usb_path: "3-4.1.3"  # Bus 3, Port 4 → Hub Port 1 → Sub-port 3
+    robot_id: "xlerobot_right_arm"
+    use_degrees: true
+
+# =============================================================================
+# CAMERAS
+# =============================================================================
+# All cameras are USB 2.0 (480Mbps max)
+# IMPORTANT: Head and wrist cameras should be on DIRECT USB ports (not through hub)
+# to avoid bandwidth saturation and frame corruption.
+
+cameras:
+  head:
+    # Central/head camera - mounted overhead or in front
+    # DIRECT connection to avoid USB bandwidth issues
+    device_index: 8  # /dev/video8
+    usb_path: "80:14.0-1"  # Bus 003 Port 001 (DIRECT - no hub)
+    connection: "direct"
+    resolution:
+      width: 640   # GR00T model requires 640x480 - cannot reduce
+      height: 480
+    fps: 30
+    fourcc: "MJPG"  # MJPG compression: ~3 MB/s vs ~28 MB/s raw
+
+  wrist:
+    # Left arm wrist camera - mounted on end effector
+    # DIRECT connection to avoid USB bandwidth issues
+    device_index: 4  # /dev/video4
+    usb_path: "80:14.0-3"  # Bus 003 Port 003 (DIRECT - no hub)
+    connection: "direct"
+    resolution:
+      width: 640   # GR00T model requires 640x480 - cannot reduce
+      height: 480
+    fps: 30
+    fourcc: "MJPG"  # MJPG compression: ~3 MB/s vs ~28 MB/s raw
+
+  right_arm:
+    # Right arm camera - currently NOT USED
+    # Connected through hub (may have bandwidth issues if used with other cameras)
+    device_index: 6  # /dev/video6
+    usb_path: "80:14.0-4.1.4"  # Bus 003 Port 004 → Hub → Port 4
+    connection: "hub"
+    resolution:
+      width: 640
+      height: 480
+    fps: 30
+
+  laptop_webcam:
+    # Built-in laptop webcam - NOT USED for robot control
+    device_index: 0  # /dev/video0
+    usb_path: "80:14.0-6"  # Bus 003 Port 006
+    connection: "internal"
+    resolution:
+      width: 1920
+      height: 1080
+    fps: 30
+
+# =============================================================================
+# INFERENCE SETTINGS
+# =============================================================================
+# Default settings for GR00T inference scripts
+
+inference:
+  # Model settings
+  data_config: "so100_dualcam"
+  embodiment_tag: "new_embodiment"
+  denoising_steps: 4
+
+  # Action execution
+  action_horizon: 16
+  action_interval: 0.033  # 30Hz execution rate
+
+  # Default task (can be overridden via command line)
+  default_task: "pick the red cube from the table"
+
+# =============================================================================
+# HOME POSITIONS
+# =============================================================================
+# Safe home positions for robot initialization (in degrees)
+
+home_positions:
+  training_aligned:
+    # Home position within training data range
+    shoulder_pan: 0.0
+    shoulder_lift: -20.0
+    elbow_flex: 20.0
+    wrist_flex: 60.0
+    wrist_roll: 0.0
+    gripper: 5.0
+
+  default:
+    # Default neutral position
+    shoulder_pan: 0.0
+    shoulder_lift: 0.0
+    elbow_flex: 0.0
+    wrist_flex: 0.0
+    wrist_roll: 0.0
+    gripper: 50.0
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+
+logging:
+  log_dir: "/home/jrobot/project/Isaac-GR00T/custom/logs"
+  eval_images_dir: "/home/jrobot/project/Isaac-GR00T/eval_images"
+
+# =============================================================================
+# USB TOPOLOGY REFERENCE (for debugging)
+# =============================================================================
+# Run these commands to verify USB connections:
+#   lsusb -t                    # Show USB tree
+#   v4l2-ctl --list-devices     # Show video devices
+#   ls -la /dev/ttyACM*         # Show serial ports
+#
+# Current topology (2025-12-06):
+# Bus 003 (USB 2.0, 480Mbps):
+#   Port 001: video8 (head camera) - DIRECT
+#   Port 003: video4 (wrist camera) - DIRECT
+#   Port 004 → Hub:
+#     Port 1: ttyACM0 (left arm serial)
+#     Port 3: ttyACM1 (right arm serial)
+#     Port 4: video6 (right arm camera)
+#   Port 006: video0-3 (laptop webcam)

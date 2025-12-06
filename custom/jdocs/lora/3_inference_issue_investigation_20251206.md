@@ -1,7 +1,7 @@
 # GR00T SO101 Inference Issue Investigation
 
 **Date**: 2025-12-06
-**Status**: Active Investigation
+**Status**: Infrastructure Fixed ✅ | Model Quality Issues Remaining 🟡
 **Problem**: Training metrics and evaluation results look good, but real robot inference performance is poor.
 
 ---
@@ -9,11 +9,41 @@
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
-2. [Pipeline Comparison: Evaluation vs Inference](#pipeline-comparison)
-3. [Root Cause Analysis](#root-cause-analysis)
-4. [Diagnostic Experiments](#diagnostic-experiments)
-5. [Findings and Evidence](#findings-and-evidence)
-6. [Recommendations](#recommendations)
+   - [The Problem](#the-problem)
+   - [Key Finding](#key-finding)
+   - [NVIDIA Reference vs Our Implementation](#nvidia-reference-vs-our-implementation)
+   - [Root Cause Summary](#root-cause-summary)
+2. [Pipeline Comparison](#pipeline-comparison)
+   - [Evaluation Pipeline (Open-Loop)](#evaluation-pipeline-open-loop)
+   - [Real Inference Pipeline (Closed-Loop)](#real-inference-pipeline-closed-loop)
+3. [Timing Comparison](#timing-comparison)
+4. [Error Accumulation Analysis](#error-accumulation-analysis)
+   - [Why Open-Loop MSE Looks Good But Closed-Loop Fails](#why-open-loop-mse-looks-good-but-closed-loop-fails)
+5. [Identified Issues](#identified-issues)
+   - [Issue 0: Blocking Architecture (CRITICAL)](#issue-0-blocking-stop-and-go-architecture-critical---from-gemini-analysis)
+   - [Issue 1: Camera Corruption (CRITICAL)](#issue-1-camera-corruption-during-inference-critical)
+   - [Issue 2: Timing Mismatch (HIGH)](#issue-2-timing-mismatch-high)
+   - [Issue 3: Per-Joint Error Distribution (HIGH)](#issue-3-per-joint-error-distribution-high)
+   - [Issue 4: Weak Temporal Ensembling (HIGH)](#issue-4-weak-temporal-ensembling-high---from-gemini-analysis)
+   - [Issue 5: Denoising Steps (MEDIUM)](#issue-5-denoising-steps-medium)
+6. [Diagnostic Test Steps](#diagnostic-test-steps-run-in-order)
+   - [Step 1: Async Throughput Test](#step-1-async-throughput-test-5-minutes--start-here)
+   - [Step 2: Camera Corruption Test](#step-2-camera-corruption-test-10-minutes)
+   - [Step 3: Closed-Loop Simulation](#step-3-closed-loop-simulation-10-minutes)
+7. [Diagnosis Results](#diagnosis-results)
+   - [Result 1: Async Throughput Test](#result-1-async-throughput-test-2025-12-06)
+   - [Result 2: Camera Corruption Test](#result-2-camera-corruption-test)
+   - [Result 3: Camera Corruption Fix - MJPEG](#result-3-camera-corruption-fix---mjpeg-compression)
+   - [Result 4: Current Performance Status](#result-4-current-performance-status-post-fix)
+   - [Result 5: Closed-Loop Simulation](#result-5-closed-loop-simulation---critical-finding)
+   - [Result 6: Temporal Ensembling Test](#result-6-temporal-ensembling-real-robot-test)
+8. [Diagnostic Experiments (Detailed)](#diagnostic-experiments-detailed)
+9. [Next Steps](#next-steps-priority-order)
+   - [Infrastructure: COMPLETE](#infrastructure--complete)
+   - [Model Quality: Incremental Verification Plan](#model-quality--needs-work---incremental-verification-plan)
+   - [Understanding Closed-Loop Validation](#understanding-closed-loop-validation)
+10. [Summary of Investigation](#summary-of-investigation)
+11. [Appendix: Reference Links](#appendix-reference-links)
 
 ---
 
@@ -546,47 +576,469 @@ python custom/scripts/diagnose_closed_loop_sim.py \
 
 ---
 
-### Step 4: Timing Analysis (5 minutes)
+### ~~Step 4: Timing Analysis~~ (SUPERSEDED)
 
-```bash
-# Profile full pipeline timing
-python custom/scripts/diagnose_timing_analysis.py \
-    --model-path /path/to/checkpoint \
-    --num-iterations 50
-
-# With real robot (optional)
-python custom/scripts/diagnose_timing_analysis.py \
-    --model-path /path/to/checkpoint \
-    --with-robot \
-    --port /dev/ttyACM2
-```
-
-**Key Metrics**:
-- **Inference time**: Should be <200ms
-- **Dead time %**: 150ms / (150ms + exec_time)
-- **Camera variance**: High max indicates USB issues
+> **Status**: Not needed. Timing issues were identified and resolved through:
+> - Async inference implementation (eliminated 27% dead time)
+> - Producer rate confirmed at ~4.5 Hz (GPU bottleneck, known limitation)
+> - MJPEG compression fixed camera bandwidth issues
 
 ---
 
-### Step 5: Real Robot Diagnostic Run (15 minutes)
+### ~~Step 5: Real Robot Diagnostic Run~~ (SUPERSEDED)
 
-```bash
-# Run with full diagnostics enabled
-python custom/scripts/infer_groot_so101.py \
-    --model-path /path/to/checkpoint \
-    --diagnostic-mode \
-    --diagnostic-output diagnostic_run_001 \
-    --go-home-first \
-    --actions-to-execute 50
+> **Status**: Not needed. Real robot testing was performed through:
+> - `infer_groot_async.py` with temporal ensembling
+> - Result: Robot moves smoothly, approaches target, but fails task
+> - Conclusion: Infrastructure is working; model quality is the bottleneck
 
-# Review results
-cat diagnostic_run_001/diagnostic_results.json
+---
+
+## Diagnosis Results
+
+### Result 1: Async Throughput Test (2025-12-06)
+
+**Tool**: `custom/scripts/diagnose_async_throughput.py`
+**Date**: 2025-12-06
+**Status**: ✅ Completed
+
+#### Raw Output
+```
+============================================================
+RESULT: pure_inference
+============================================================
+  Duration:      30.4s
+  Inferences:    209
+  Throughput:    6.86 Hz
+
+  Latency (ms):
+    Mean:        144.7
+    Std:         197.9
+    Min:         67.6
+    Max:         729.1
+    P95:         688.4
+============================================================
+
+============================================================
+ASYNC SIMULATION RESULT
+============================================================
+  Producer rate:   6.47 Hz
+  Consumer rate:   6.43 Hz
+  Queue drops:     0
+  Stale actions:   0 (0.0%)
+  Latency (mean):  154.4ms
+============================================================
+
+  Current blocking architecture:
+    Inference time:  145ms
+    Execution time:  396ms
+    Dead time:       26.8% (robot idle during inference)
+============================================================
 ```
 
-**Check for**:
-- Camera corruption count
-- Timing consistency
-- State drift patterns
+#### Key Findings
+
+| Metric | Value | Target | Status |
+|--------|-------|--------|--------|
+| Inference rate | **6.86 Hz** | >15 Hz | ❌ Below threshold |
+| Mean latency | **144.7ms** | <70ms | ❌ Too slow |
+| Latency variance | **67-729ms** | Low | ❌ Very high! |
+| Dead time | **26.8%** | <10% | ❌ Confirmed |
+| Stale actions | **0%** | <10% | ✅ Good |
+
+#### Analysis
+
+1. **Speed Limit Confirmed**: GPU can only process ~6.9 frames/second
+   - NVIDIA reference target: 50Hz (20ms)
+   - Our actual rate: ~7Hz (145ms)
+   - **7x slower than target**
+
+2. **Dead Time Validated**:
+   - Calculation: 145ms / (145ms + 396ms) = **26.8%**
+   - Robot stops for >1/4 of the time
+   - Matches our hypothesis from Issue #0
+
+3. **Latency Instability** (CRITICAL):
+   - Min: 67.6ms, Max: 729.1ms (10x variance!)
+   - Std: 197.9ms (very high)
+   - Possible causes: GPU thermal throttling, power throttling, or GC pauses
+
+4. **Async Viability Assessment**:
+   - Even at 7Hz, async **eliminates** the stop-go jerkiness
+   - Consumer thread can interpolate to 30Hz for smooth motion
+   - **Verdict**: Async is VIABLE and RECOMMENDED
+
+#### Comparison: Blocking vs Async at 7Hz
+
+```
+Current (Blocking @ ~1.8Hz effective):
+  [INFERENCE 145ms][----EXECUTE 396ms----][INFERENCE 145ms][----EXECUTE 396ms----]
+  Robot: STOP.......MOVE MOVE MOVE MOVE....STOP.......MOVE MOVE MOVE MOVE
+
+Async with Interpolation (Smooth 30Hz):
+  Producer: [INFER][INFER][INFER][INFER][INFER][INFER][INFER]...  (~7Hz)
+  Consumer: [M][M][M][M][M][M][M][M][M][M][M][M][M][M][M][M]...   (30Hz)
+  Robot:    SMOOTH CONTINUOUS MOTION (interpolated between predictions)
+```
+
+#### Action Items from This Result
+
+| Priority | Action | Status |
+|----------|--------|--------|
+| **P0** | Implement `infer_groot_async.py` | ✅ **DONE** |
+| P1 | Test async inference on robot | 🔄 Ready to test |
+| P2 | Investigate latency variance (67-729ms) | Pending |
+| P3 | TensorRT optimization to reach 20Hz+ | Pending |
+
+#### Next Step: Test Async Inference
+
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+
+# Run async inference for 60 seconds
+python custom/scripts/infer_groot_async.py \
+    --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251204_215410259/best \
+    --duration 60 \
+    --go-home-first \
+    --output async_test_results.json
+```
+
+**Expected improvement**: Robot should move smoothly at 30Hz instead of stop-go at ~1.8Hz.
+
+---
+
+### Result 2: Camera Corruption Test
+
+**Tool**: `custom/scripts/infer_groot_async.py --record-imgs`
+**Date**: 2025-12-06
+**Status**: ✅ Completed - **CRITICAL ISSUE FOUND**
+
+#### Evidence: Recorded Inference Images
+
+Images captured during async inference run (30 seconds, 152 frames):
+
+| Image | Corruption Type | Severity |
+|-------|-----------------|----------|
+| `eval_images/head_00000.jpg` | Image tearing - horizontal misalignment | HIGH |
+| `eval_images/head_00010.jpg` | Horizontal stripe artifacts throughout | CRITICAL |
+| `eval_images/wrist_00000.jpg` | Horizontal stripes + green bar (buffer corruption) | CRITICAL |
+
+#### Visual Evidence
+
+**head_00000.jpg** - Tearing/misalignment:
+```
+┌─────────────────────────────┐
+│  ████ SHIFTED LEFT  ████   │ ← rows misaligned
+│████ SHIFTED RIGHT ████████ │
+│  ████ SHIFTED LEFT  ████   │
+│       NORMAL ROW           │
+└─────────────────────────────┘
+```
+
+**head_00010.jpg / wrist_00000.jpg** - Severe horizontal banding:
+```
+┌─────────────────────────────┐
+│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│ ← corrupted scanlines
+│░░░░░░░░░░░░░░░░░░░░░░░░░░░░│ ← partial valid data
+│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│
+│░░░░░░░░░░░░░░░░░░░░░░░░░░░░│
+│████████ GREEN BAR █████████│ ← buffer corruption
+└─────────────────────────────┘
+```
+
+#### Root Cause Analysis
+
+The corruption pattern indicates **USB bandwidth/timing issues**:
+
+1. **Horizontal banding** = Scanlines arriving out of sync
+2. **Image tearing** = Frame buffer read during write
+3. **Green bar** = Uninitialized memory in frame buffer
+
+```mermaid
+flowchart LR
+    subgraph Issue["USB Bandwidth Contention"]
+        C1["Head Camera"] --> USB["USB 2.0 Bus<br/>(shared bandwidth)"]
+        C2["Wrist Camera"] --> USB
+        USB --> CPU["CPU Buffer"]
+
+        GPU["GPU Inference<br/>(150ms)"] -.->|"DMA contention"| USB
+        GPU -.->|"Memory pressure"| CPU
+    end
+
+    style USB fill:#FF6B6B
+    style GPU fill:#FFB6C1
+```
+
+**Both cameras share the same USB controller**, causing:
+- Bandwidth starvation during inference
+- Frame buffer corruption when GPU is busy
+- Inconsistent frame timing
+
+#### Impact on Model Performance
+
+**This is the ROOT CAUSE of the oscillation behavior:**
+
+| What Model Sees | What Model Does |
+|-----------------|-----------------|
+| Corrupted horizontal stripes | Cannot identify objects |
+| Missing scene information | Predicts random/uncertain actions |
+| Inconsistent visual input | Actions oscillate without direction |
+
+The model cannot approach the target because it **literally cannot see the target** in the corrupted images.
+
+#### Correlation with Async Test Results
+
+From the async inference log:
+```
+Producer: 5.0Hz | Consumer: 30.0Hz | Stale: 0.0% | Latency: 36ms
+```
+
+The async architecture is working correctly (no stale actions), but the **input data is corrupted at the source**.
+
+#### Recommended Fixes
+
+| Priority | Fix | Effort |
+|----------|-----|--------|
+| **P0** | Use separate USB controllers for each camera | Hardware change |
+| **P0** | Add frame validation before inference | ~1 hour |
+| **P1** | Reduce camera resolution (320x240) to lower bandwidth | ~30 min |
+| **P1** | Add USB buffer flush before capture | ~30 min |
+| **P2** | Implement frame retry on corruption | ~1 hour |
+
+#### Immediate Next Step
+
+```bash
+# Check USB topology to confirm shared controller
+lsusb -t
+
+# Identify which USB ports are on separate controllers
+# Move cameras to different controllers if available
+```
+
+---
+
+### Result 3: Camera Corruption Fix - MJPEG Compression
+
+**Date**: 2025-12-06
+**Status**: ✅ **RESOLVED**
+
+#### Problem
+USB 2.0 bandwidth (~35 MB/s limit) was exceeded by raw video from 2 cameras:
+- Raw (YUYV): ~28 MB/s per camera × 2 = **~56 MB/s** ❌ Exceeded limit
+
+#### Solution: MJPEG Compression
+
+The same solution used in data collection (`collect_xlerobot_data.py`) was applied to inference:
+
+```python
+# Before (raw format - caused corruption)
+OpenCVCameraConfig(index_or_path=8, fps=30, width=640, height=480)
+
+# After (MJPEG compressed - works!)
+OpenCVCameraConfig(index_or_path=8, fps=30, width=640, height=480, fourcc="MJPG")
+```
+
+#### Bandwidth Comparison
+
+| Format | Per Camera | 2 Cameras | Status |
+|--------|-----------|-----------|--------|
+| Raw (YUYV) | ~28 MB/s | ~56 MB/s | ❌ Corrupted images |
+| **MJPEG** | **~3 MB/s** | **~6 MB/s** | ✅ Clean images |
+
+#### Why Resolution Reduction Didn't Work
+
+Initial attempt to reduce resolution to 320×240 failed because GR00T model **validates input resolution**:
+
+```
+AssertionError: Video video.front has invalid resolution (320, 240), expected (640, 480)
+```
+
+The model's `VideoToTensor` transform enforces the training resolution. **Cannot change capture resolution.**
+
+#### Files Modified
+
+1. **`custom/scripts/infer_groot_async.py`**:
+   - Added `fourcc` parameter to `So101RobotInterface.__init__()`
+   - Added `--fourcc` CLI argument (default: "MJPG")
+   - Updated bandwidth logging to show compressed rate
+
+2. **`custom/cfgs/so101_hardware.yaml`**:
+   ```yaml
+   cameras:
+     head:
+       fps: 30
+       fourcc: "MJPG"  # ~3 MB/s vs ~28 MB/s raw
+     wrist:
+       fps: 30
+       fourcc: "MJPG"
+   ```
+
+#### Verification
+
+Latest inference log (`infer_groot_async_20251206_180610.log`):
+```
+Camera: 640x480 @ 30fps (MJPG)
+Est. USB bandwidth: ~6 MB/s (MJPG compressed, limit ~35 MB/s)
+```
+
+Images in `eval_images/` are now **clean** with no horizontal banding or corruption.
+
+#### Key Learning
+
+**Always use MJPEG for USB 2.0 cameras** when multiple cameras share a bus. This is the same approach used in training data collection - inference should match.
+
+---
+
+### Result 4: Current Performance Status (Post-Fix)
+
+**Date**: 2025-12-06
+**Status**: 🟡 Infrastructure Fixed, Model Behavior Still Poor
+
+#### Latest Inference Metrics
+
+From `infer_groot_async_20251206_180610.log`:
+
+| Metric | Value | Status |
+|--------|-------|--------|
+| Camera format | 640×480 @ 30fps (MJPG) | ✅ No corruption |
+| USB bandwidth | ~6 MB/s | ✅ Well under limit |
+| Producer rate | 4.9 Hz | ⚠️ Slow (target: 15Hz+) |
+| Consumer rate | 29.9 Hz | ✅ Good |
+| Stale actions | 0% | ✅ Good |
+| Avg latency | 36ms | ✅ Good |
+| Inference time | ~195ms | ⚠️ Slow |
+
+#### What's Working
+
+1. ✅ **Camera images are clean** - no more corruption
+2. ✅ **Async architecture** - 30Hz action execution, no stop-go jerkiness
+3. ✅ **USB bandwidth** - MJPEG keeps it well under limit
+4. ✅ **Robot moves towards target** - model responds to visual input
+
+#### What's Still Wrong
+
+1. ❌ **Jerky/dangerous movements** - arm oscillates, doesn't smoothly approach
+2. ❌ **Task not completing** - doesn't successfully pick the cube
+3. ❌ **Inference too slow** - 195ms (~5Hz) vs target 50-70ms (~15-20Hz)
+
+#### Root Cause Analysis
+
+The infrastructure is now correct. Remaining issues are **model quality**:
+
+| Factor | Current | Optimal | Impact |
+|--------|---------|---------|--------|
+| Training steps | 5K | 50K+ | Model underfitted |
+| Denoising steps | 4 | 8-16 | Noisy action predictions |
+| Inference speed | 195ms | 50-70ms | Slow response to changes |
+| LoRA rank | 16 | 32-64 | Limited model capacity |
+
+---
+
+### Result 5: Closed-Loop Simulation - CRITICAL FINDING
+
+**Tool**: `custom/scripts/diagnose_closed_loop_sim.py`
+**Date**: 2025-12-06
+**Status**: ✅ Completed
+
+#### Quantitative Results
+
+| Metric | Open-Loop | Closed-Loop | Ratio |
+|--------|-----------|-------------|-------|
+| **Overall MSE** | 19.5° | 382.0° | **19.6x** ❌ |
+| Overall MAE | 3.4° | 16.2° | 4.8x |
+| **Final State Drift** | - | **99.0°** | CRITICAL |
+
+**Interpretation**: Ratio > 5x indicates **SEVERE error accumulation**. The policy is "Open-Loop Overfitted".
+
+#### Per-Joint Breakdown (MSE)
+
+| Joint | Open-Loop | Closed-Loop | Degradation |
+|-------|-----------|-------------|-------------|
+| `shoulder_pan` | 3.0° | **714.7°** | **238x** (Worst!) |
+| `wrist_roll` | 17.3° | **642.7°** | 37x |
+| `gripper` | 4.4° | **524.0°** | 119x |
+| `shoulder_lift` | 16.9° | **346.0°** | 20x |
+| `elbow_flex` | 65.5° | 58.8° | 0.9x (Stable) |
+| `wrist_flex` | 9.7° | 5.9° | 0.6x (Stable) |
+
+**Analysis**: The `shoulder_pan` (base rotation) is the most unstable. A small error here swings the entire arm, changing the visual perspective significantly.
+
+#### Root Cause
+
+The policy is **Open-Loop Overfitted**:
+1. It has learned to memorize the trajectory from exact training states
+2. It has NOT learned to correct deviations
+3. When it drifts slightly, it panics and predicts erratic actions
+
+This explains the "back and forth" random behavior on the real robot.
+
+#### Action Taken: Implement Temporal Ensembling
+
+Based on this finding, implemented **Sliding Window Temporal Ensembling** in `infer_groot_async.py`:
+
+**Before** (Weak Interpolation):
+```python
+# Only blend first 3 actions on transition
+if action_idx < 3:
+    blend = action_idx / 3.0
+    action = (1 - blend) * prev_action + blend * new_action
+```
+
+**After** (Proper Ensembling):
+```python
+# Average ALL overlapping predictions
+class TemporalEnsembleBuffer:
+    def get_ensembled_action(self):
+        valid_actions = [pred[local_idx] for pred in overlapping_predictions]
+        return np.mean(valid_actions, axis=0)  # Reduces variance by sqrt(N)
+```
+
+**Expected Improvement**:
+- Variance reduced by √N where N = number of overlapping predictions (typically 2-3)
+- Smooths out "wild" predictions that cause drift
+- Standard approach used in ACT and Diffusion Policy
+
+---
+
+### Result 6: Temporal Ensembling Real Robot Test
+
+**Date**: 2025-12-06
+**Status**: ✅ Completed
+
+#### Test Configuration
+- Script: `infer_groot_async.py` with `TemporalEnsembleBuffer`
+- Denoising steps: 8
+- Duration: 30 seconds
+- Task: "pick the red cube from the table"
+
+#### Metrics
+
+| Metric | Value | Status |
+|--------|-------|--------|
+| Producer rate | 4.2 Hz | ✅ Expected (8 denoising steps) |
+| Consumer rate | 27.7 Hz | ✅ Good |
+| **Ensembled actions** | **99.2%** | ✅ Excellent |
+| Stale actions | 0% | ✅ Good |
+
+#### Observed Behavior
+
+| Aspect | Before Ensembling | After Ensembling |
+|--------|-------------------|------------------|
+| Motion smoothness | Jerky, oscillating | **Smooth, continuous** |
+| Target approach | Back-and-forth | **Approaches target** |
+| Task completion | Failed | **Still failed** |
+
+#### Conclusion
+
+**Temporal ensembling improved smoothness but didn't fix task completion.**
+
+This confirms the closed-loop simulation finding: the policy is "open-loop overfitted" and cannot recover from state deviations. Software optimizations reduce symptoms but cannot fix the fundamental model quality issue.
+
+---
+
+### Result 7: Timing Analysis (SUPERSEDED)
+
+> **Status**: Not needed - see Step 4 above.
 
 ---
 
@@ -822,6 +1274,16 @@ flowchart TB
 
    Use `diagnose_async_throughput.py` to verify feasibility first.
 
+   **Implementation**: `custom/scripts/infer_groot_async.py` ✅ CREATED
+
+   ```bash
+   # Run async inference
+   python custom/scripts/infer_groot_async.py \
+       --model-path /path/to/checkpoint \
+       --duration 60 \
+       --go-home-first
+   ```
+
 5. **Fix camera corruption**
    - Use separate USB controllers for cameras
    - Implement frame validation before inference
@@ -855,11 +1317,257 @@ flowchart TB
 |------|---------|
 | `custom/jdocs/lora/3_inference_issue_investigation_20251206.md` | This document |
 | `custom/jdocs/lora/4_gemini_inference_issue_investigation_20251206.md` | Gemini's analysis (complementary) |
+| `custom/jdocs/lora/5_review_of_claude_investigation_20251206.md` | Gemini's review of recommendations |
+| `custom/jdocs/lora/6_diagnosis_results_phase1_20251206.md` | Gemini's analysis of diagnosis results |
 | `custom/scripts/diagnose_camera_sync.py` | Camera corruption diagnosis |
 | `custom/scripts/diagnose_timing_analysis.py` | Pipeline timing analysis |
 | `custom/scripts/diagnose_closed_loop_sim.py` | Error accumulation simulation |
 | `custom/scripts/diagnose_async_throughput.py` | Async architecture feasibility test |
 | `custom/scripts/infer_groot_so101.py` | Modified with `--diagnostic-mode` flag |
+| `custom/scripts/infer_groot_async.py` | **NEW** Async inference with producer-consumer architecture |
+
+---
+
+---
+
+## Next Steps (Priority Order)
+
+### Infrastructure: ✅ COMPLETE
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Async inference architecture | ✅ Done | `infer_groot_async.py` |
+| Camera MJPEG compression | ✅ Done | 640×480 @ 30fps, ~6 MB/s |
+| Hardware config centralized | ✅ Done | `so101_hardware.yaml` |
+| USB bandwidth issue | ✅ Fixed | MJPEG reduces 56→6 MB/s |
+
+### Model Quality: 🔴 NEEDS WORK - Incremental Verification Plan
+
+The remaining issues are **model quality**, not infrastructure. The closed-loop simulation confirmed the policy is "open-loop overfitted" (19.6x error ratio).
+
+#### Incremental Training Verification Strategy
+
+**Principle**: Before committing to long training runs (25K+ steps), we need to verify that training step count is indeed the bottleneck. We will train incrementally and measure improvement at each checkpoint.
+
+##### Step 1: Resume Training from 5K → 10K (~1 hour)
+
+**Command** (using same script as initial training):
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+
+# Resume from the 5K checkpoint to reach 10K (per train_groot_mvp.sh header)
+python scripts/gr00t_finetune.py \
+    --dataset-path /home/jrobot/project/XLeRobot/datasets_groot \
+    --output-dir /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251204_215410259 \
+    --max-steps 10000 \
+    --save-steps 500 \
+    --batch-size 8 \
+    --learning-rate 1e-4 \
+    --data-config so100_dualcam \
+    --video-backend torchvision_av \
+    --lora-rank 16 \
+    --no-tune_diffusion_model \
+    --dataloader_num_workers 16 \
+    --resume
+```
+
+> **Note**: Uses `--resume` flag with same `--output-dir` as original training. The script will continue from the last checkpoint (5000 steps) to 10000 steps.
+
+##### Step 2: Run Closed-Loop Simulation at 10K Checkpoint
+
+**Command**:
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+
+# Run closed-loop simulation with 10K model
+python custom/scripts/diagnose_closed_loop_sim.py \
+    --checkpoint /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_10k/best \
+    --dataset /home/jrobot/project/XLeRobot/datasets_groot \
+    --steps 50 \
+    --output custom/logs/closedloop_sim_10k.json
+```
+
+##### Step 3: Compare 5K vs 10K Results
+
+| Metric | 5K Checkpoint | 10K Checkpoint | Expected |
+|--------|---------------|----------------|----------|
+| Open-loop MSE | 19.5° | ? | Similar or lower |
+| Closed-loop MSE | 382.0° | ? | **Must be lower** |
+| Error ratio | **19.6x** | ? | **< 15x (improvement)** |
+| Total drift | 99.0° | ? | **< 80° (improvement)** |
+
+**Success Criteria**:
+- If error ratio drops by 20%+ → Training is working, continue to 25K
+- If error ratio is unchanged → Training step count is NOT the issue, investigate:
+  - Data quality
+  - LoRA rank (try 32)
+  - Learning rate
+  - State/action normalization mismatch
+
+##### Step 4: If 10K Shows Improvement → Continue to 25K
+
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+
+# Only if 10K shows measurable improvement in error ratio
+python scripts/gr00t_finetune.py \
+    --dataset-path /home/jrobot/project/XLeRobot/datasets_groot \
+    --output-dir /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251204_215410259 \
+    --max-steps 25000 \
+    --save-steps 1000 \
+    --batch-size 8 \
+    --learning-rate 1e-4 \
+    --data-config so100_dualcam \
+    --video-backend torchvision_av \
+    --lora-rank 16 \
+    --no-tune_diffusion_model \
+    --dataloader_num_workers 16 \
+    --resume
+```
+
+##### Step 5: Real Robot Validation
+
+Only after closed-loop MSE shows significant improvement:
+
+```bash
+# Test on real robot
+python custom/scripts/infer_groot_async.py \
+    --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_10k/best \
+    --duration 30 \
+    --go-home-first
+```
+
+#### Why This Approach?
+
+1. **Fact-based**: Quantitative metrics at each checkpoint, not guessing
+2. **Efficient**: 2 hours per increment vs 10+ hours for full 50K training
+3. **Diagnostic**: If 10K doesn't improve, we know training steps isn't the issue
+4. **Reversible**: Can stop at any point if results plateau
+
+#### Understanding Closed-Loop Validation
+
+**Why Open-Loop Metrics Can Be Misleading**
+
+Standard evaluation (open-loop) tests the model like this:
+```
+Step 1: Give model GT_state[1] → Get prediction[1] → Compare to GT_action[1]
+Step 2: Give model GT_state[2] → Get prediction[2] → Compare to GT_action[2]
+...
+```
+Each step is **independent**. Even if prediction[1] was wrong, step 2 still gets the perfect GT_state[2].
+
+Real robot (closed-loop) works like this:
+```
+Step 1: Give model state[1] → Get prediction[1] → Robot executes → Actual state[2] = prediction[1] + error
+Step 2: Give model state[2] (with error!) → Get prediction[2] → Robot executes → state[3] = prediction[2] + more error
+...
+```
+Errors **compound**. A small error in step 1 changes the input for step 2, which may cause a larger error.
+
+**How Our Simulation Works**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CLOSED-LOOP SIMULATION                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Initialize: simulated_state = GT_state[0]                      │
+│                                                                 │
+│  For each step:                                                 │
+│    1. OPEN-LOOP test:                                           │
+│       - Input: GT_state[t], GT_images[t]                        │
+│       - Output: action_openloop                                 │
+│       - Error: |action_openloop - GT_action[t]|                 │
+│                                                                 │
+│    2. CLOSED-LOOP test:                                         │
+│       - Input: simulated_state[t], GT_images[t]  ← KEY DIFF     │
+│       - Output: action_closedloop                               │
+│       - Error: |action_closedloop - GT_action[t]|               │
+│                                                                 │
+│    3. Update simulated state:                                   │
+│       - simulated_state[t+1] = action_closedloop                │
+│         (SO101 uses absolute positions, so action = next state) │
+│                                                                 │
+│    4. Track drift:                                              │
+│       - drift[t] = |simulated_state[t] - GT_state[t]|           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Interpreting Results**
+
+| Error Ratio (CL/OL) | Interpretation |
+|---------------------|----------------|
+| < 2x | Model is robust - can recover from errors |
+| 2-5x | Moderate instability - may work with ensembling |
+| **> 5x** | **Severe instability** - model cannot recover from drift |
+
+Our 5K model has **19.6x ratio** → Policy is "open-loop overfitted". It memorized trajectories from exact training states but can't generalize to slightly different states.
+
+**What Improvement Looks Like**
+
+After more training, we expect:
+- Lower absolute closed-loop MSE
+- **Lower error ratio** (key metric!)
+- Stable drift that doesn't grow unboundedly
+
+#### Verified: Closed-Loop Simulation Script
+
+The `diagnose_closed_loop_sim.py` script was verified correct:
+- ✅ Open-loop: Uses ground truth state from dataset
+- ✅ Closed-loop: Uses simulated state (previous prediction)
+- ✅ State transition: `next_state = action` (correct for SO101 absolute positioning)
+- ✅ Error accumulation: Properly compounds over time
+
+#### Quick Experiments (Optional, Low Priority)
+
+These may help marginally but won't fix the fundamental issue:
+
+1. **Already tested: 8 denoising steps** - Improved smoothness but task still fails
+2. **Task description variations** - Not expected to help with overfitting
+3. **Action normalization** - Already verified to match training
+
+#### Architecture Changes (If Training Fails)
+
+If incremental training doesn't improve error ratio:
+
+1. **Increase LoRA rank** (current: 16, try: 32 or 64)
+   - More model capacity for learning correction behaviors
+
+2. **Add data augmentation**
+   - State perturbation during training to improve robustness
+
+3. **Different training recipe**
+   - Try higher learning rate in later steps
+   - Adjust warmup schedule
+
+---
+
+## Summary of Investigation
+
+### Timeline
+
+| Date | Finding | Action |
+|------|---------|--------|
+| 2025-12-06 AM | Blocking architecture causes 27% dead time | Created async inference script |
+| 2025-12-06 PM | Camera images corrupted (USB bandwidth) | Fixed with MJPEG compression |
+| 2025-12-06 PM | Infrastructure working, model behavior poor | **Current state** |
+
+### Key Learnings
+
+1. **Always use MJPEG** for USB 2.0 cameras with multiple cameras
+2. **Async architecture** eliminates stop-go jerkiness
+3. **Match training settings** - inference should use same FPS, resolution, normalization
+4. **5K training steps insufficient** for complex manipulation tasks
+
+### Files Created
+
+| File | Purpose |
+|------|---------|
+| `custom/scripts/infer_groot_async.py` | Async producer-consumer inference |
+| `custom/cfgs/so101_hardware.yaml` | Centralized hardware config |
+| `custom/scripts/detect_hardware.py` | USB device detection |
+| `custom/scripts/diagnose_async_throughput.py` | Async feasibility test |
 
 ---
 

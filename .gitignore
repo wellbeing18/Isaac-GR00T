@@ -124,3 +124,4 @@ tmp/
 output/
 outputs/
 eval_images/
+custom/logs
