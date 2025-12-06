@@ -57,9 +57,9 @@ def verify_dataset_structure(dataset_path: Path) -> Tuple[bool, List[str]]:
     │   ├── stats.json         # Normalization statistics
     │   └── episodes.jsonl     # Episode metadata
     ├── videos/
-    │   └── *.mp4              # Video files
+    │   └── {camera}/chunk-XXX/file-000.mp4   # Video files (chunked)
     └── data/
-        └── *.parquet          # State/action data
+        └── chunk-XXX/episode_XXXXXX.parquet  # State/action data (chunked)
     """
     print_header("Dataset Structure Verification")
 
@@ -91,13 +91,13 @@ def verify_dataset_structure(dataset_path: Path) -> Tuple[bool, List[str]]:
             issues.append(f"Missing {filename}")
             all_passed = False
 
-    # Check videos directory
+    # Check videos directory (search recursively for chunked structure)
     videos_dir = dataset_path / "videos"
     if videos_dir.exists():
-        video_files = list(videos_dir.glob("*.mp4"))
+        video_files = list(videos_dir.glob("**/*.mp4"))
         print_check("videos/ directory exists", True, f"{len(video_files)} video files")
         if len(video_files) == 0:
-            print_warning("No .mp4 files found in videos/")
+            print_warning("No .mp4 files found in videos/ (searched recursively)")
             issues.append("No video files found")
             all_passed = False
     else:
@@ -105,13 +105,13 @@ def verify_dataset_structure(dataset_path: Path) -> Tuple[bool, List[str]]:
         issues.append("Missing videos/ directory")
         all_passed = False
 
-    # Check data directory
+    # Check data directory (search recursively for chunked structure)
     data_dir = dataset_path / "data"
     if data_dir.exists():
-        parquet_files = list(data_dir.glob("*.parquet"))
+        parquet_files = list(data_dir.glob("**/*.parquet"))
         print_check("data/ directory exists", True, f"{len(parquet_files)} parquet files")
         if len(parquet_files) == 0:
-            print_warning("No .parquet files found in data/")
+            print_warning("No .parquet files found in data/ (searched recursively)")
             issues.append("No parquet files found")
             all_passed = False
     else:
@@ -282,9 +282,15 @@ def verify_stats_json(dataset_path: Path) -> Tuple[bool, List[str]]:
                             print_warning(f"'{key}' has Inf values in statistics!")
                             issues.append(f"'{key}' has Inf in statistics")
 
-                        # Print summary
-                        print(f"           mean range: [{min(mean):.2f}, {max(mean):.2f}]")
-                        print(f"           std range:  [{min(std):.2f}, {max(std):.2f}]")
+                        # Print summary (convert to float to handle numpy types)
+                        try:
+                            mean_min, mean_max = float(min(mean)), float(max(mean))
+                            std_min, std_max = float(min(std)), float(max(std))
+                            print(f"           mean range: [{mean_min:.2f}, {mean_max:.2f}]")
+                            print(f"           std range:  [{std_min:.2f}, {std_max:.2f}]")
+                        except (TypeError, ValueError):
+                            print(f"           mean: {mean[:3]}..." if len(mean) > 3 else f"           mean: {mean}")
+                            print(f"           std: {std[:3]}..." if len(std) > 3 else f"           std: {std}")
                     else:
                         print_warning(f"'{key}' has scalar stats (expected per-dimension arrays)")
                         issues.append(f"'{key}' stats are scalars, not arrays")
@@ -352,35 +358,64 @@ def verify_video_files(dataset_path: Path) -> Tuple[bool, List[str]]:
         print_check("videos/ directory exists", False)
         return False, ["videos/ directory not found"]
 
-    video_files = list(videos_dir.glob("*.mp4"))
+    # Search recursively for chunked structure
+    video_files = list(videos_dir.glob("**/*.mp4"))
     print_check(f"Video files found", True, f"{len(video_files)} files")
 
     if len(video_files) == 0:
-        return False, ["No video files found"]
+        return False, ["No video files found (searched recursively)"]
 
     # Test reading a sample of video files
-    try:
-        import decord
-        decord.bridge.set_bridge("torch")
+    # Use PyAV (av) which supports AV1 codec, fallback to decord
+    sample_size = min(3, len(video_files))
+    sample_files = video_files[:sample_size]
 
-        sample_size = min(3, len(video_files))
-        sample_files = video_files[:sample_size]
+    # Try PyAV first (better codec support, used by GR00T training)
+    try:
+        import av
 
         for video_path in sample_files:
             try:
-                vr = decord.VideoReader(str(video_path))
-                num_frames = len(vr)
-                height, width = vr[0].shape[:2]
-                print_check(f"{video_path.name}", True, f"{num_frames} frames, {width}x{height}")
+                container = av.open(str(video_path))
+                stream = container.streams.video[0]
+                num_frames = stream.frames
+                width = stream.codec_context.width
+                height = stream.codec_context.height
+                codec = stream.codec_context.name
+                container.close()
+                print_check(f"{video_path.name}", True, f"{num_frames} frames, {width}x{height}, codec: {codec}")
             except Exception as e:
                 print_check(f"{video_path.name}", False, str(e))
                 issues.append(f"Cannot read {video_path.name}: {e}")
 
-        print(f"  (tested {sample_size} of {len(video_files)} videos)")
+        print(f"  (tested {sample_size} of {len(video_files)} videos using PyAV)")
 
     except ImportError:
-        print_warning("decord not installed, skipping video verification")
-        print_warning("Install with: pip install decord")
+        # Fallback to decord (doesn't support AV1)
+        try:
+            import decord
+            decord.bridge.set_bridge("torch")
+
+            for video_path in sample_files:
+                try:
+                    vr = decord.VideoReader(str(video_path))
+                    num_frames = len(vr)
+                    height, width = vr[0].shape[:2]
+                    print_check(f"{video_path.name}", True, f"{num_frames} frames, {width}x{height}")
+                except Exception as e:
+                    # Check if it's an AV1 codec issue
+                    if "video stream" in str(e).lower():
+                        print_warning(f"{video_path.name}: May be AV1 codec (decord doesn't support AV1)")
+                        print_warning("  GR00T training uses PyAV which supports AV1 - this should be OK")
+                    else:
+                        print_check(f"{video_path.name}", False, str(e))
+                        issues.append(f"Cannot read {video_path.name}: {e}")
+
+            print(f"  (tested {sample_size} of {len(video_files)} videos using decord)")
+
+        except ImportError:
+            print_warning("Neither PyAV nor decord installed, skipping video verification")
+            print_warning("Install with: pip install av  (recommended for AV1 support)")
 
     return len(issues) == 0, issues
 

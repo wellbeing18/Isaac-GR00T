@@ -3,10 +3,16 @@
 # GR00T SO101 Inference Wrapper Script
 # Purpose: Easy execution of finetuned GR00T model on SO101 arm
 #
+# FPS Configuration (per 6_fps_upgrade_30hz.md):
+#   - Action frequency: 30 Hz (synchronized with video)
+#   - Camera FPS: 30 fps
+#   - Action interval: 0.033s (1/30 Hz)
+#
 # Usage:
-#   ./infer_groot_so101.sh                           # Run with defaults
+#   ./infer_groot_so101.sh                           # Run with defaults (no display)
 #   ./infer_groot_so101.sh --task "grasp object"    # Specify task
 #   ./infer_groot_so101.sh --actions-to-execute 50  # Limit action chunks
+#   ./infer_groot_so101.sh --display                # Enable camera display
 #   ./infer_groot_so101.sh --help                   # Show all options
 ################################################################################
 
@@ -22,11 +28,13 @@ echo "========================================================================"
 echo ""
 
 # Default configuration
-MODEL_PATH="${MODEL_PATH:-/home/jrobot/project/XLeRobot/outputs/groot_mini_mvp_test}"
+# MODEL_PATH must be set by user or via environment variable
+MODEL_PATH="${MODEL_PATH:-}"
 DATA_CONFIG="${DATA_CONFIG:-so100_dualcam}"
 EMBODIMENT_TAG="${EMBODIMENT_TAG:-new_embodiment}"
-TASK="${TASK:-grasp object}"
-PORT="${PORT:-/dev/ttyACM0}"
+# Task must match training task descriptions
+TASK="${TASK:-pick the red cube from the table}"
+PORT="${PORT:-/dev/ttyACM2}"  # Left arm port
 HEAD_CAM_IDX="${HEAD_CAM_IDX:-4}"
 WRIST_CAM_IDX="${WRIST_CAM_IDX:-6}"
 ACTION_HORIZON="${ACTION_HORIZON:-12}"
@@ -57,11 +65,24 @@ fi
 
 echo "LeRobot: OK"
 
-# Check model path exists
+# Check model path is provided and exists
+if [ -z "$MODEL_PATH" ]; then
+    echo ""
+    echo "ERROR: MODEL_PATH not set!"
+    echo ""
+    echo "Usage:"
+    echo "  MODEL_PATH=/path/to/checkpoint ./infer_groot_so101.sh"
+    echo ""
+    echo "Example:"
+    echo "  MODEL_PATH=/home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_XXX/best ./infer_groot_so101.sh"
+    echo ""
+    exit 1
+fi
+
 if [ ! -d "$MODEL_PATH" ]; then
     echo ""
     echo "ERROR: Model checkpoint not found at: $MODEL_PATH"
-    echo "Please verify the model path or set MODEL_PATH environment variable."
+    echo "Please verify the model path."
     exit 1
 fi
 

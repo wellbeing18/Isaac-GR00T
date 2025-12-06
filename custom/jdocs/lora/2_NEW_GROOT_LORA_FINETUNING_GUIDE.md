@@ -2,7 +2,7 @@
 
 ## Complete Guide with Monitoring, Evaluation, and Diagnosis
 
-**Last Updated:** 2025-12-01 (v2.0 - Post Pre-Flight Checklist Implementation)
+**Last Updated:** 2025-12-04 (v2.2 - Updated multi-task workflow with key concepts walkthrough)
 **Robot:** SO-ARM101 Left Arm (6 DOF)
 **GPU:** RTX 5090 (24GB VRAM)
 **Model:** GR00T N1.5 (3B parameters)
@@ -179,7 +179,53 @@ python custom/scripts/convert_lerobot_v3_to_groot.py \
 
 #### Option B: Multi-Task Dataset (Recommended for 6-Task Training)
 
-This is the workflow we used for the 6-task dataset (grasp, pick, place, push, reach, release).
+This is the workflow for combining multiple task datasets (grasp, pick, place, push, reach, release) into one GR00T-compatible dataset.
+
+---
+
+#### Key Concepts: LeRobot v3 → GR00T Conversion
+
+Before diving into commands, here's what happens under the hood:
+
+**1. Why Conversion is Needed**
+
+LeRobot v3 and GR00T expect different metadata formats:
+
+| File | LeRobot v3 | GR00T |
+|------|------------|-------|
+| Episodes | `meta/episodes/chunk-000/file-000.parquet` | `meta/episodes.jsonl` |
+| Tasks | `meta/tasks.parquet` | `meta/tasks.jsonl` |
+| Modality | Not present | `meta/modality.json` (required!) |
+| Data | `data/chunk-000/file-000.parquet` (consolidated) | `data/chunk-000/episode_000.parquet` (per-episode) |
+
+**2. The Chunk System (Critical for Videos)**
+
+LeRobot stores video frames in **chunks** - one video file contains frames for MANY episodes:
+
+```
+videos/observation.images.head/
+└── chunk-000/
+    └── file-000.mp4   # Contains frames for episodes 0-999 (based on chunk_size)
+```
+
+Episodes use **timestamps** (stored in parquet) to extract their frames from the shared video.
+This is why we can't simply rename videos per-episode - they must stay as chunks.
+
+**3. Combining Datasets = Shifting Chunks**
+
+When combining datasets, we shift chunk indices to avoid collisions:
+
+```
+Dataset A (pick):    chunk-000, chunk-001  →  Combined: chunk-000, chunk-001
+Dataset B (place):   chunk-000             →  Combined: chunk-002
+Dataset C (push):    chunk-000             →  Combined: chunk-003
+```
+
+Episode indices are also shifted to match: `new_episode = chunk_offset * chunk_size + old_episode`
+
+---
+
+#### Step-by-Step Workflow
 
 **Step 1: Copy original dataset to working directory**
 
@@ -194,8 +240,13 @@ cp -r /home/jrobot/project/XLeRobot/datasets "/home/jrobot/project/XLeRobot/data
 cd /home/jrobot/project/Isaac-GR00T
 conda activate groot
 
-# Convert each task dataset
-# The script uses task descriptions from tasks.parquet if available
+# Option A: Use the multi-task conversion script (recommended)
+bash custom/scripts/convert_multitask_to_groot.sh
+
+# Option B: Validate only (no modifications)
+bash custom/scripts/convert_multitask_to_groot.sh --validate-only
+
+# Option C: Manual conversion (if you need custom paths)
 for task in grasp pick place push reach release; do
     python custom/scripts/convert_lerobot_v3_to_groot.py \
         --dataset-path "/home/jrobot/project/XLeRobot/datasets copy/left/$task" \
@@ -204,90 +255,120 @@ for task in grasp pick place push reach release; do
 done
 ```
 
+**What the conversion does for each dataset:**
+
+```
+BEFORE (LeRobot v3):                    AFTER (GR00T-compatible):
+meta/                                   meta/
+├── info.json                           ├── info.json
+├── stats.json                          ├── stats.json (fixed counts)
+├── tasks.parquet          ──────►      ├── tasks.jsonl
+├── episodes/chunk-000/file-000.parquet ├── episodes.jsonl (with task_index)
+└── config.yaml                         └── modality.json (NEW!)
+
+data/chunk-000/                         data/chunk-000/
+└── file-000.parquet       ──────►      ├── episode_000.parquet
+    (all episodes)                      ├── episode_001.parquet
+                                        └── ... (per-episode)
+```
+
+**Configuration** (edit `convert_multitask_to_groot.sh` to customize):
+```bash
+DATASETS_BASE="/home/jrobot/project/XLeRobot/datasets copy"  # Working copy!
+ARM="left"
+ROBOT_TYPE="so101"
+TASKS=("pick" "place" "push" "reach" "grasp" "release")
+```
+
 **Step 3: Combine all tasks into one dataset**
 
 ```bash
 python custom/scripts/combine_groot_datasets.py \
+    --input-dir "/home/jrobot/project/XLeRobot/datasets copy/left" \
+    --output "/home/jrobot/project/XLeRobot/datasets_groot"
+```
+
+Or specify datasets explicitly:
+```bash
+python custom/scripts/combine_groot_datasets.py \
     --datasets \
-        "/home/jrobot/project/XLeRobot/datasets copy/left/grasp" \
         "/home/jrobot/project/XLeRobot/datasets copy/left/pick" \
         "/home/jrobot/project/XLeRobot/datasets copy/left/place" \
         "/home/jrobot/project/XLeRobot/datasets copy/left/push" \
-        "/home/jrobot/project/XLeRobot/datasets copy/left/reach" \
-        "/home/jrobot/project/XLeRobot/datasets copy/left/release" \
-    --output "/home/jrobot/project/XLeRobot/datasets_groot_combined"
+    --output "/home/jrobot/project/XLeRobot/datasets_groot"
 ```
 
-**Step 4: Copy videos (combine script doesn't handle LeRobot v3 chunk format)**
+**What the combine script does:**
+
+```
+INPUT (3 separate datasets):
+
+pick/   (10 episodes, chunk-000)
+place/  (10 episodes, chunk-000)
+push/   (10 episodes, chunk-000)
+
+                    ↓ Combine with chunk shifting ↓
+
+OUTPUT (1 combined dataset):
+
+datasets_groot/
+├── meta/
+│   ├── tasks.jsonl      # 3 tasks: [0] pick, [1] place, [2] push
+│   ├── episodes.jsonl   # 30 episodes with remapped task_index
+│   └── ...
+├── data/
+│   ├── chunk-000/       # pick episodes (0-9)
+│   │   ├── episode_000000.parquet
+│   │   └── ...
+│   ├── chunk-001/       # place episodes (1000-1009)
+│   │   ├── episode_001000.parquet
+│   │   └── ...
+│   └── chunk-002/       # push episodes (2000-2009)
+│       └── ...
+└── videos/
+    └── observation.images.head/
+        ├── chunk-000/file-000.mp4  # pick video
+        ├── chunk-001/file-000.mp4  # place video
+        └── chunk-002/file-000.mp4  # push video
+```
+
+**Step 4: Verify the combined dataset**
 
 ```bash
-# The combine script expects flat MP4 files, but LeRobot v3 uses chunk directories
-# Copy videos manually with episode offset
-
-BASE="/home/jrobot/project/XLeRobot/datasets copy/left"
-OUT="/home/jrobot/project/XLeRobot/datasets_groot_combined/videos"
-
-mkdir -p "$OUT/observation.images.head"
-mkdir -p "$OUT/observation.images.left_wrist"
-
-episode_offset=0
-for task in grasp pick place push reach release; do
-    episodes=$(python3 -c "import json; print(json.load(open('$BASE/$task/meta/info.json'))['total_episodes'])")
-
-    for cam in "observation.images.head" "observation.images.left_wrist"; do
-        src_video="$BASE/$task/videos/$cam/chunk-000/file-000.mp4"
-        if [ -f "$src_video" ]; then
-            chunk_dir="$OUT/$cam/chunk-$(printf '%03d' $episode_offset)"
-            mkdir -p "$chunk_dir"
-            cp "$src_video" "$chunk_dir/file-000.mp4"
-        fi
-    done
-
-    episode_offset=$((episode_offset + episodes))
-done
+python custom/scripts/verify_groot_training_setup.py \
+    --dataset /home/jrobot/project/XLeRobot/datasets_groot
 ```
 
-**Step 5: Fix stats.json (combine script may produce incorrect format)**
-
-```bash
-# Copy stats.json from the largest dataset (e.g., pick)
-cp "/home/jrobot/project/XLeRobot/datasets copy/left/pick/meta/stats.json" \
-   "/home/jrobot/project/XLeRobot/datasets_groot_combined/meta/stats.json"
-```
-
-**Step 6: Rename to final location**
-
-```bash
-mv "/home/jrobot/project/XLeRobot/datasets_groot_combined" \
-   "/home/jrobot/project/XLeRobot/datasets_groot"
-```
+---
 
 **Expected Combined Dataset Structure:**
 
 ```
 datasets_groot/
 ├── meta/
-│   ├── info.json           # Combined dataset info (68 episodes, 7059 frames, 6 tasks)
+│   ├── info.json           # Combined: total_episodes, total_frames, total_tasks
 │   ├── modality.json       # GR00T format mapping
-│   ├── stats.json          # Normalization statistics
-│   ├── episodes.jsonl      # 68 episodes with task indices
-│   └── tasks.jsonl         # 6 task descriptions
+│   ├── stats.json          # Combined normalization statistics
+│   ├── episodes.jsonl      # All episodes with task_index
+│   └── tasks.jsonl         # All task descriptions
 ├── data/
-│   ├── episode_000.parquet # grasp episodes 0-9
-│   ├── episode_010.parquet # pick episodes 10-24
-│   ├── ...
-│   └── episode_067.parquet # release episode 67
+│   ├── chunk-000/          # First dataset's episodes
+│   │   ├── episode_000000.parquet
+│   │   └── ...
+│   ├── chunk-001/          # Second dataset's episodes
+│   │   └── ...
+│   └── ...
 └── videos/
     ├── observation.images.head/
-    │   ├── chunk-000/file-000.mp4  # grasp
-    │   ├── chunk-010/file-000.mp4  # pick
+    │   ├── chunk-000/file-000.mp4
+    │   ├── chunk-001/file-000.mp4
     │   └── ...
     └── observation.images.left_wrist/
         ├── chunk-000/file-000.mp4
         └── ...
 ```
 
-**Our 6-Task Dataset Summary:**
+**Example 6-Task Dataset Summary:**
 
 | Task | Episodes | Frames | Task Description |
 |------|----------|--------|------------------|
@@ -566,7 +647,8 @@ All scripts are in `/home/jrobot/project/Isaac-GR00T/custom/scripts/`
 
 | Script | Purpose | Usage |
 |--------|---------|-------|
-| `convert_lerobot_v3_to_groot.py` | Convert LeRobot v3 to GR00T format | `python convert_lerobot_v3_to_groot.py --dataset-path /path --robot-type so101 --dual-camera` |
+| `convert_lerobot_v3_to_groot.py` | Convert single LeRobot v3 dataset to GR00T format | `python convert_lerobot_v3_to_groot.py --dataset-path /path --robot-type so101 --dual-camera` |
+| `convert_multitask_to_groot.sh` | Convert all 6 task datasets in batch | `bash convert_multitask_to_groot.sh` or `bash convert_multitask_to_groot.sh --validate-only` |
 | `combine_groot_datasets.py` | Combine multiple datasets | `python combine_groot_datasets.py --input-dir /path --output /path/combined` |
 
 ### Training & Verification Scripts
@@ -592,6 +674,75 @@ All scripts are in `/home/jrobot/project/Isaac-GR00T/custom/scripts/`
 
 ---
 
+## Industry Best Practices (NVIDIA/HuggingFace)
+
+Based on research from official NVIDIA getting_started guides and HuggingFace blog posts:
+
+### Data Collection FPS - Clarification
+
+**Important: Camera FPS vs Action FPS are different concepts!**
+
+| Aspect | Recommendation | Your Setup | Status |
+|--------|----------------|------------|--------|
+| **Camera FPS** | 30 FPS (video capture) | 30 FPS | ✓ Correct |
+| **Action FPS** | 5 FPS (model training) | 5 FPS | ✓ Correct |
+
+**Why 5 FPS Action Frequency Works for Both GR00T and Pi0.5:**
+| Model | Action Steps | At 5 FPS | Temporal Context |
+|-------|-------------|----------|------------------|
+| **Pi0.5** | 50 steps | 50 × 0.2s | **10 seconds** |
+| **GR00T** | 16 steps | 16 × 0.2s | **3.2 seconds** |
+
+**Bottom Line:** Your 5 FPS action data works for both GR00T and Pi0.5 finetuning.
+
+### Diffusion Model Tuning
+
+**`--no-tune_diffusion_model` is the CORRECT setting:**
+
+| Component | With Flag | Without Flag |
+|-----------|-----------|--------------|
+| Visual Encoder | Frozen | Frozen |
+| Language Model | Frozen | Frozen |
+| **Projector** | **TRAINED** | **TRAINED** |
+| **Diffusion Model (DiT)** | **FROZEN** | TRAINED |
+
+**Why this is correct:**
+- The DiT is a shared action head across all embodiments (pre-trained)
+- Freezing it is NVIDIA's default and recommended setting
+- VRAM: 18-20GB (vs 58-70GB for full finetuning)
+- Required for RTX 4090/5090 (24GB VRAM)
+
+**Note:** `--no-tune_diffusion_model` does NOT disable LoRA. LoRA is controlled by `--lora-rank`.
+
+### Resume Training (5K → 10K)
+
+GR00T supports resuming training via `--resume` flag:
+
+```bash
+# Phase 1: Initial 5K training (use train_groot_mvp.sh)
+bash custom/scripts/train_groot_mvp.sh
+
+# Phase 2: Validate checkpoint
+python custom/scripts/evaluate_groot_checkpoint.py --training-dir OUTPUT_DIR
+
+# Phase 3: Resume from 5K to 10K
+python scripts/gr00t_finetune.py \
+    --dataset-path /home/jrobot/project/XLeRobot/datasets_groot \
+    --output-dir OUTPUT_DIR \
+    --max-steps 10000 \
+    --save-steps 500 \
+    --batch-size 4 \
+    --learning-rate 1e-4 \
+    --data-config so100_dualcam \
+    --video-backend torchvision_av \
+    --lora-rank 16 \
+    --no-tune_diffusion_model \
+    --dataloader_num_workers 16 \
+    --resume
+```
+
+---
+
 ## Training Configurations
 
 ### MVP (5000 Steps) - Recommended
@@ -602,6 +753,7 @@ SAVE_STEPS=500
 BATCH_SIZE=4
 LEARNING_RATE=1e-4
 LORA_RANK=16
+NUM_WORKERS=16  # Per HuggingFace recommendation
 ```
 
 **Expected results:**

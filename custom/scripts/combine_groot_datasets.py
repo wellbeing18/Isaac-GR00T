@@ -26,10 +26,78 @@ Date: 2025-12-01
 import argparse
 import json
 import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 import numpy as np
+
+
+def check_ffmpeg_available() -> bool:
+    """Check if ffmpeg is available in PATH."""
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-version'],
+            capture_output=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def concatenate_video_files(video_files: List[Path], output_path: Path) -> bool:
+    """
+    Concatenate multiple video files into one using ffmpeg.
+
+    Uses stream copy (no re-encoding) for fast, lossless concatenation.
+
+    Args:
+        video_files: List of video file paths to concatenate (in order)
+        output_path: Output path for the concatenated video
+
+    Returns:
+        True if successful, False otherwise
+    """
+    if len(video_files) == 0:
+        return False
+
+    if len(video_files) == 1:
+        # Just copy the single file
+        shutil.copy2(video_files[0], output_path)
+        return True
+
+    # Create temporary concat list file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        concat_list_path = Path(f.name)
+        for vf in sorted(video_files):
+            # Use absolute paths and escape single quotes
+            escaped_path = str(vf.absolute()).replace("'", "'\\''")
+            f.write(f"file '{escaped_path}'\n")
+
+    try:
+        # Run ffmpeg concat with stream copy (lossless, fast)
+        result = subprocess.run(
+            [
+                'ffmpeg',
+                '-y',  # Overwrite output
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', str(concat_list_path),
+                '-c', 'copy',  # Stream copy, no re-encoding
+                str(output_path)
+            ],
+            capture_output=True,
+            timeout=300  # 5 minute timeout
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        print(f"    Warning: ffmpeg timeout concatenating videos")
+        return False
+    finally:
+        # Cleanup temp file
+        concat_list_path.unlink(missing_ok=True)
 
 
 def load_json(path: Path) -> Dict:
@@ -61,7 +129,7 @@ def save_jsonl(path: Path, items: List[Dict]) -> None:
             f.write(json.dumps(item) + '\n')
 
 
-def get_dataset_info(dataset_path: Path) -> Dict:
+def get_dataset_info(dataset_path: Path) -> Optional[Dict]:
     """Get info about a GR00T dataset."""
     meta_dir = dataset_path / "meta"
 
@@ -91,8 +159,10 @@ def get_dataset_info(dataset_path: Path) -> Dict:
         "total_episodes": info.get("total_episodes", len(episodes)),
         "total_frames": info.get("total_frames", 0),
         "fps": info.get("fps", 5),
+        "chunk_size": info.get("chunks_size", 1000),
         "tasks": tasks,
         "episodes": episodes,
+        "modality": load_json(meta_dir / "modality.json") if (meta_dir / "modality.json").exists() else {}
     }
 
 
@@ -247,12 +317,52 @@ def combine_datasets(datasets: List[Dict], output_path: Path, dry_run: bool = Fa
     # Step 4: Combine episodes with new indices
     print("\n[4/6] Combining episodes...")
     combined_episodes = []
-    episode_offset = 0
+    
+    # Calculate offsets based on chunk alignment
+    # We need to ensure that if we use chunked videos, the new episodes map to the correct new chunks.
+    # Current strategy: We preserve CHUNKS, not just episodes.
+    
+    # To allow physically merging datasets without re-encoding videos, 
+    # we must maintain the alignment: (episode_index // chunk_size) corresponds to a specific video file.
+    #
+    # Algorithm:
+    # 1. Get chunk_size (assume constant across datasets for now, or use max)
+    # 2. For each dataset:
+    #    - Calculate how many chunks it occupies: num_chunks = ceil(total_episodes / chunk_size)
+    #    - The next dataset must start at: current_chunk_offset * chunk_size
+    #    - This creates gaps in episode indices, but that is allowed.
+    
+    # Assume chunk_size from first dataset
+    chunk_size = datasets[0]["chunk_size"]
+    current_chunk_offset = 0
+    
+    dataset_offsets = [] # Store (start_episode_index, chunk_offset) for each dataset
 
     for ds_idx, ds in enumerate(datasets):
+        # Ensure consistent chunk size
+        if ds["chunk_size"] != chunk_size:
+             print(f"  Warning: Dataset {ds['path'].name} has different chunk_size {ds['chunk_size']} vs {chunk_size}. Using {chunk_size}.")
+        
+        # Calculate start episode index for this dataset
+        start_ep_idx = current_chunk_offset * chunk_size
+        dataset_offsets.append((start_ep_idx, current_chunk_offset))
+        
+        print(f"  Dataset {ds['path'].name}: starts at episode {start_ep_idx} (Chunk {current_chunk_offset})")
+        
+        # Determine how many chunks this dataset uses
+        # We need to find the max episode index to know how many chunks are used
+        max_ep_idx = 0
+        if ds["episodes"]:
+            max_ep_idx = max(ep["episode_index"] for ep in ds["episodes"])
+        else:
+            max_ep_idx = ds["total_episodes"] - 1
+            
+        used_chunks = (max_ep_idx // chunk_size) + 1
+        current_chunk_offset += used_chunks
+
         for ep in ds["episodes"]:
             old_ep_idx = ep["episode_index"]
-            new_ep_idx = episode_offset + old_ep_idx
+            new_ep_idx = start_ep_idx + old_ep_idx
 
             old_task_idx = ep.get("task_index", 0)
             new_task_idx = task_mapping.get((ds_idx, old_task_idx), 0)
@@ -263,84 +373,196 @@ def combine_datasets(datasets: List[Dict], output_path: Path, dry_run: bool = Fa
                 "task_index": new_task_idx,
             })
 
-        episode_offset += ds["total_episodes"]
-
     save_jsonl(output_path / "meta" / "episodes.jsonl", combined_episodes)
     print(f"  Created: episodes.jsonl ({len(combined_episodes)} episodes)")
 
     # Step 5: Copy and rename data files
     print("\n[5/6] Copying data files...")
-    episode_offset = 0
+    copied_count = 0
 
     for ds_idx, ds in enumerate(datasets):
         data_dir = ds["path"] / "data"
         if not data_dir.exists():
             print(f"  Warning: No data/ in {ds['path'].name}")
             continue
-
-        # Find parquet files
-        parquet_files = sorted(data_dir.glob("**/*.parquet"))
-
-        for pq_file in parquet_files:
-            # Parse episode index from filename
-            # Format: episode_000000.parquet or chunk-000/episode_000.parquet
-            name = pq_file.stem
-            if "episode" in name:
+            
+        start_ep_idx, chunk_offset = dataset_offsets[ds_idx]
+        
+        # Case 1: Already converted (flat episode_XXX.parquet)
+        # We need to put them into chunk folders to match the new schema
+        flat_parquet_files = sorted(data_dir.glob("episode_*.parquet"))
+        
+        if flat_parquet_files:
+             print(f"  Processing {ds['path'].name}: found {len(flat_parquet_files)} flat parquet files")
+             for pq_file in flat_parquet_files:
                 try:
-                    old_ep_idx = int(name.split("_")[-1])
-                    new_ep_idx = episode_offset + old_ep_idx
-                    new_name = f"episode_{new_ep_idx:06d}.parquet"
-                    shutil.copy2(pq_file, output_path / "data" / new_name)
+                    old_ep_idx = int(pq_file.stem.split('_')[-1])
+                    new_ep_idx = start_ep_idx + old_ep_idx
+                    
+                    # Determine new chunk
+                    new_chunk_idx = new_ep_idx // chunk_size
+                    
+                    # Create chunk directory
+                    chunk_dir = output_path / "data" / f"chunk-{new_chunk_idx:03d}"
+                    chunk_dir.mkdir(exist_ok=True)
+                    
+                    target = chunk_dir / f"episode_{new_ep_idx:06d}.parquet"
+                    shutil.copy2(pq_file, target)
+                    copied_count += 1
                 except ValueError:
-                    # Just copy with original name if can't parse
-                    shutil.copy2(pq_file, output_path / "data" / pq_file.name)
+                    pass
+        else:
+            # Case 2: Chunked (chunk-XXX/episode_XXX.parquet) - from new converter
+            # Case 3: Raw LeRobot (chunk-XXX/file-YYY.parquet)
+            # We search recursively
+            all_parquets = sorted(data_dir.glob("**/*.parquet"))
+            print(f"  Processing {ds['path'].name}: found {len(all_parquets)} chunked parquet files")
+            
+            for pq_file in all_parquets:
+                # Try to parse chunk/file structure
+                old_ep_idx = -1
+                
+                # Is it inside a chunk folder?
+                parent_name = pq_file.parent.name
+                if parent_name.startswith("chunk-"):
+                    try:
+                        old_chunk_idx = int(parent_name.split("-")[-1])
+                        
+                        if pq_file.name.startswith("episode_"):
+                             # chunk-000/episode_000.parquet (Converted format)
+                             # Note: episode index in filename is usually local or global?
+                             # In the converter script, we kept global index??
+                             # Let's assume the filename contains the global index for that dataset.
+                             old_ep_idx = int(pq_file.stem.split("_")[-1])
+                        elif pq_file.name.startswith("file-"):
+                             # chunk-000/file-000.parquet (LeRobot format)
+                             file_idx = int(pq_file.stem.split("-")[-1])
+                             old_ep_idx = old_chunk_idx * chunk_size + file_idx
+                    except ValueError:
+                        pass
+                
+                if old_ep_idx >= 0:
+                    new_ep_idx = start_ep_idx + old_ep_idx
+                    new_chunk_idx = new_ep_idx // chunk_size
+                    
+                    chunk_dir = output_path / "data" / f"chunk-{new_chunk_idx:03d}"
+                    chunk_dir.mkdir(exist_ok=True)
+                    
+                    # We always output as episode_XXXX.parquet
+                    target = chunk_dir / f"episode_{new_ep_idx:06d}.parquet"
+                    shutil.copy2(pq_file, target)
+                    copied_count += 1
 
-        episode_offset += ds["total_episodes"]
-
-    data_files = list((output_path / "data").glob("*.parquet"))
-    print(f"  Copied {len(data_files)} parquet files")
+    print(f"  Copied {copied_count} parquet files")
 
     # Step 6: Copy and rename video files
     print("\n[6/6] Copying video files...")
-    episode_offset = 0
+    copied_videos = 0
+    concatenated_videos = 0
+
+    # Check if ffmpeg is available (needed for concatenation)
+    ffmpeg_available = check_ffmpeg_available()
+    if not ffmpeg_available:
+        print("  Warning: ffmpeg not found. Videos with multiple files per chunk cannot be concatenated.")
+        print("           Install ffmpeg: sudo apt install ffmpeg")
+
+    # Get video mapping from first dataset's modality.json
+    video_keys = {} # groot_key -> original_key
+    if "video" in datasets[0]["modality"]:
+         for k, v in datasets[0]["modality"]["video"].items():
+             video_keys[k] = v.get("original_key", k)
+
+    print(f"  Video keys to process: {video_keys}")
 
     for ds_idx, ds in enumerate(datasets):
-        videos_dir = ds["path"] / "videos"
-        if not videos_dir.exists():
+        videos_root = ds["path"] / "videos"
+        if not videos_root.exists():
             print(f"  Warning: No videos/ in {ds['path'].name}")
             continue
 
-        video_files = sorted(videos_dir.glob("*.mp4"))
+        start_ep_idx, chunk_offset = dataset_offsets[ds_idx]
 
-        for video_file in video_files:
-            name = video_file.stem
-            # Parse: observation.images.front_episode_000000.mp4
-            if "episode_" in name:
-                try:
-                    parts = name.split("episode_")
-                    prefix = parts[0]  # e.g., "observation.images.front_"
-                    old_ep_idx = int(parts[1])
-                    new_ep_idx = episode_offset + old_ep_idx
-                    new_name = f"{prefix}episode_{new_ep_idx:06d}.mp4"
-                    shutil.copy2(video_file, output_path / "videos" / new_name)
-                except (ValueError, IndexError):
-                    shutil.copy2(video_file, output_path / "videos" / video_file.name)
+        for groot_key, original_key in video_keys.items():
+            # Path to specific camera videos: videos/observation.images.head/
+            camera_dir = videos_root / original_key
 
-        episode_offset += ds["total_episodes"]
+            if not camera_dir.exists():
+                 print(f"    Warning: Video dir not found: {camera_dir}")
+                 continue
 
-    video_files = list((output_path / "videos").glob("*.mp4"))
-    print(f"  Copied {len(video_files)} video files")
+            # Group video files by their source chunk
+            # Structure: chunk-XXX/file-YYY.mp4
+            chunk_files: Dict[int, List[Path]] = {}  # old_chunk_idx -> list of video files
+
+            for v_file in sorted(camera_dir.glob("**/*.mp4")):
+                if v_file.parent.name.startswith("chunk-"):
+                    try:
+                        old_chunk_idx = int(v_file.parent.name.split("-")[-1])
+                        if old_chunk_idx not in chunk_files:
+                            chunk_files[old_chunk_idx] = []
+                        chunk_files[old_chunk_idx].append(v_file)
+                    except ValueError:
+                        pass
+                elif "episode_" in v_file.name:
+                    print(f"    Warning: Found per-episode video {v_file.name}. Skipping.")
+
+            # Process each chunk
+            for old_chunk_idx, files in sorted(chunk_files.items()):
+                new_chunk_idx = chunk_offset + old_chunk_idx
+                target_dir = output_path / "videos" / original_key / f"chunk-{new_chunk_idx:03d}"
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_file = target_dir / "file-000.mp4"
+
+                if len(files) == 1:
+                    # Single file - just copy
+                    shutil.copy2(files[0], target_file)
+                    copied_videos += 1
+                elif len(files) > 1:
+                    # Multiple files - need to concatenate
+                    if ffmpeg_available:
+                        sorted_files = sorted(files)  # Ensure correct order (file-000, file-001, ...)
+                        print(f"    Concatenating {len(sorted_files)} videos for {original_key}/chunk-{new_chunk_idx:03d}...")
+                        if concatenate_video_files(sorted_files, target_file):
+                            concatenated_videos += 1
+                        else:
+                            print(f"    ERROR: Failed to concatenate videos for chunk-{new_chunk_idx:03d}")
+                            # Fallback: copy first file only
+                            shutil.copy2(sorted_files[0], target_file)
+                            print(f"    Fallback: Copied only {sorted_files[0].name}")
+                            copied_videos += 1
+                    else:
+                        # No ffmpeg - copy first file and warn
+                        print(f"    Warning: Multiple video files in chunk-{old_chunk_idx:03d} but ffmpeg unavailable")
+                        print(f"             Only copying {files[0].name}, other files will be lost!")
+                        shutil.copy2(sorted(files)[0], target_file)
+                        copied_videos += 1
+
+    print(f"  Copied {copied_videos} video files")
+    if concatenated_videos > 0:
+        print(f"  Concatenated {concatenated_videos} multi-file chunks")
 
     # Step 7: Create info.json
-    print("\n[7/6] Creating info.json...")
+    print("\n[7/7] Creating info.json...")
     info = {
+        "codebase_version": "v2.0",
+        "robot_type": "so101_follower",
         "total_episodes": total_episodes,
         "total_frames": total_frames,
         "total_tasks": len(combined_tasks),
         "fps": datasets[0]["fps"],
-        "robot_type": "so101_follower",
+        "chunks_size": chunk_size, 
+        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+        "video_path": "videos/{video_key}/chunk-{episode_chunk:03d}/file-000.mp4", # Fixed: Use literal file-000.mp4
         "source_datasets": [str(ds["path"]) for ds in datasets],
     }
+    
+    # Copy features from first dataset if available (useful for dimension info)
+    ds0_info_path = datasets[0]["path"] / "meta" / "info.json"
+    if ds0_info_path.exists():
+        ds0_info = load_json(ds0_info_path)
+        if "features" in ds0_info:
+            info["features"] = ds0_info["features"]
+            
     save_json(output_path / "meta" / "info.json", info)
 
     print("\n" + "=" * 60)

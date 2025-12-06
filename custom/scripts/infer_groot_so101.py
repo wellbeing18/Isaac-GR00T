@@ -5,9 +5,15 @@
 # SO101 GR00T Inference Script - All-in-one version
 # Adapted from examples/SO-100/eval_gr00t_so100.py for dual-camera SO101 setup
 #
+# FPS Configuration (per 6_fps_upgrade_30hz.md):
+#   - Action frequency: 30 Hz (synchronized with video)
+#   - Camera FPS: 30 fps
+#   - Action interval: 0.033s (1/30 Hz)
+#
 # Usage:
 #   python infer_groot_so101.py --model-path /path/to/checkpoint
 #   python infer_groot_so101.py --help
+#
 
 import argparse
 import json
@@ -178,7 +184,12 @@ def load_groot_with_lora(
         policy._state_delta_indices = np.array(modality_config["state"].delta_indices)
         policy._state_horizon = len(policy._state_delta_indices)
     policy._action_delta_indices = np.array(modality_config["action"].delta_indices)
-    policy._action_horizon = len(policy._action_delta_indices)
+    # Note: Gr00tPolicy doesn't expose _action_horizon/indices publicly by default,
+    # but they are used internally for prediction logic
+    
+    # Try setting them if attributes exist, otherwise rely on internal load
+    if hasattr(policy, '_action_horizon'):
+        policy._action_horizon = len(policy._action_delta_indices)
 
     print(f"[LoRA] GR00T model with LoRA loaded successfully!")
     print(f"[LoRA] GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
@@ -217,7 +228,8 @@ class SO101Robot:
         # Handle calibration if needed - delete existing calibration
         if self.calibrate:
             import shutil
-            calibration_folder = os.path.expanduser(f"~/.cache/lerobot/calibration/so101_follower/{robot_id}")
+            # LeRobot v0.4+ stores calibration in huggingface cache
+            calibration_folder = os.path.expanduser(f"~/.cache/huggingface/lerobot/calibration/robots/so101_follower")
             print(f"========> Deleting calibration folder: {calibration_folder}")
             if os.path.exists(calibration_folder):
                 shutil.rmtree(calibration_folder)
@@ -285,17 +297,38 @@ class SO101Robot:
         time.sleep(2)
         print("-------------------------------- Moved to initial pose")
 
-    def go_home(self):
-        """Move robot to home position."""
+    def go_home(self, training_aligned: bool = False):
+        """Move robot to home position.
+
+        Args:
+            training_aligned: If True, move to a position within training data range.
+                             If False, move to the default home (all zeros, gripper open).
+        """
         print("-------------------------------- Moving to home pose")
-        home_action = {
-            "shoulder_pan.pos": 0.0,
-            "shoulder_lift.pos": 0.0,
-            "elbow_flex.pos": 0.0,
-            "wrist_flex.pos": 0.0,
-            "wrist_roll.pos": 0.0,
-            "gripper.pos": 50.0,
-        }
+        if training_aligned:
+            # Training-aligned home position (within training data ranges)
+            # Based on training data means:
+            #   shoulder_pan: mean=1.7, shoulder_lift: mean=-19.7
+            #   elbow_flex: mean=21.7, wrist_flex: mean=59.3
+            #   wrist_roll: mean=0.4, gripper: mean=4.6
+            home_action = {
+                "shoulder_pan.pos": 0.0,
+                "shoulder_lift.pos": -20.0,
+                "elbow_flex.pos": 20.0,
+                "wrist_flex.pos": 60.0,
+                "wrist_roll.pos": 0.0,
+                "gripper.pos": 5.0,  # Slightly open, NOT 50°!
+            }
+            print("  Using training-aligned home (within training range)")
+        else:
+            home_action = {
+                "shoulder_pan.pos": 0.0,
+                "shoulder_lift.pos": 0.0,
+                "elbow_flex.pos": 0.0,
+                "wrist_flex.pos": 0.0,
+                "wrist_roll.pos": 0.0,
+                "gripper.pos": 50.0,
+            }
         self.robot.send_action(home_action)
         time.sleep(2)
 
@@ -377,7 +410,7 @@ class Gr00tLocalInference:
         model_path: str,
         data_config: str = "so100_dualcam",
         embodiment_tag: str = "new_embodiment",
-        task: str = "pick red_cube from center",
+        task: str = "pick the red cube from the table",  # Must match training task
         denoising_steps: int = 4,
     ):
         self.task = task
@@ -497,8 +530,8 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="/home/jrobot/project/XLeRobot/outputs/groot_mini_mvp_test",
-        help="Path to the finetuned GR00T checkpoint",
+        required=True,
+        help="Path to the finetuned GR00T checkpoint (e.g., /path/to/outputs/groot_mvp_lora_XXX/best)",
     )
     parser.add_argument(
         "--data-config",
@@ -523,8 +556,8 @@ def main():
     parser.add_argument(
         "--task",
         type=str,
-        default="pick red_cube from center",
-        help="Task description for the model (should match training data task)",
+        default="pick the red cube from the table",
+        help="Task description (must match training task, e.g., 'pick the red cube from the table')",
     )
 
     # Robot configuration
@@ -574,23 +607,59 @@ def main():
     parser.add_argument(
         "--action-interval",
         type=float,
-        default=0.02,
-        help="Time interval between actions in seconds (default: 0.02 = 50Hz)",
+        default=0.033,
+        help="Time interval between actions in seconds (default: 0.033 = 30Hz)",
     )
 
     # Visualization
     parser.add_argument(
-        "--no-display",
+        "--display",
         action="store_true",
-        help="Disable image display",
+        help="Enable image display (disabled by default)",
     )
     parser.add_argument(
         "--record-imgs",
         action="store_true",
         help="Record images to eval_images/ folder",
     )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Save inference log to file (e.g., inference.log)",
+    )
+    parser.add_argument(
+        "--go-home-first",
+        action="store_true",
+        help="Move robot to home position before starting inference (use if robot is in unknown state)",
+    )
 
     args = parser.parse_args()
+
+    # Setup logging to file if requested
+    log_file = None
+    if args.log_file:
+        import datetime
+        log_file = open(args.log_file, "w")
+        def log_print(*args_print, **kwargs):
+            message = " ".join(str(a) for a in args_print)
+            print(message, **kwargs)
+            log_file.write(message + "\n")
+            log_file.flush()
+    else:
+        log_print = print
+
+    # Known training tasks (from datasets_groot/meta/tasks.jsonl)
+    TRAINING_TASKS = [
+        "grasp the red cube",
+        "pick the red cube from the table",
+        "pick the green cube from the table",
+        "place the red cube in the white bowl",
+        "place the green cube in the white bowl",
+        "push the red cube to the green cube",
+        "reach the red cube",
+        "release",
+    ]
 
     # Print configuration
     print("=" * 70)
@@ -600,6 +669,20 @@ def main():
     print(f"Data config: {args.data_config}")
     print(f"Embodiment tag: {args.embodiment_tag}")
     print(f"Task: {args.task}")
+
+    # Validate task description
+    if args.task not in TRAINING_TASKS:
+        print()
+        print("⚠️  WARNING: Task description does not match training tasks!")
+        print(f"   Your task: '{args.task}'")
+        print(f"   Training tasks:")
+        for t in TRAINING_TASKS:
+            print(f"     - '{t}'")
+        print()
+        print("   GR00T uses task description for conditioning. Mismatched tasks may cause poor performance.")
+        print("   Consider using: --task 'pick the red cube from the table'")
+        print()
+
     print(f"Robot port: {args.port}")
     print(f"Robot ID: {args.robot_id}")
     print(f"Head camera index: {args.head_cam_idx}")
@@ -641,17 +724,48 @@ def main():
 
     # Run inference loop
     with robot.activate():
+        # Go to home position first if requested
+        if args.go_home_first:
+            print("\n[RESET] Moving to training-aligned home position before inference...")
+            print("  This ensures the robot starts from a state similar to training data.")
+            robot.go_home(training_aligned=True)
+            time.sleep(1.0)  # Wait for robot to settle
+            state = robot.get_current_state()
+            print(f"  Home state: {np.round(state, 2)}")
+            print(f"    Expected: [0, -20, 20, 60, 0, 5] (training mean positions)")
+            print("  Ready to start inference.\n")
+
+        # WARMUP PHASE
+        print("\nRunning warmup inference (10 steps)...")
+        # Dummy inputs for warmup
+        dummy_head = np.zeros((480, 640, 3), dtype=np.uint8)
+        dummy_wrist = np.zeros((480, 640, 3), dtype=np.uint8)
+        dummy_state = np.zeros(6)
+        for _ in range(10):
+            inference.get_action(dummy_head, dummy_wrist, dummy_state)
+        print("Warmup complete!\n")
+
         print("\nStarting inference loop...")
         print(f"Press Ctrl+C to stop\n")
 
         try:
+            last_inference_time = time.time()
+            # Initialize previous action for temporal ensembling
+            prev_action_chunk = None
+            
             for chunk_idx in tqdm(range(args.actions_to_execute), desc="Executing action chunks"):
                 # Get observations
                 head_img, wrist_img = robot.get_dual_images()
                 state = robot.get_current_state()
 
-                # Display images
-                if not args.no_display:
+                # Record first image to verify camera mapping
+                if chunk_idx == 0 and args.record_imgs:
+                    cv2.imwrite(f"eval_images/debug_head_00000.jpg", cv2.cvtColor(head_img, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(f"eval_images/debug_wrist_00000.jpg", cv2.cvtColor(wrist_img, cv2.COLOR_RGB2BGR))
+                    print("\n[DEBUG] Saved debug_head_00000.jpg and debug_wrist_00000.jpg. PLEASE VERIFY THEY ARE CORRECT!")
+
+                # Display images (disabled by default)
+                if args.display:
                     view_dual_images(head_img, wrist_img, f"Chunk {chunk_idx}")
 
                 # Get action from model
@@ -659,18 +773,65 @@ def main():
                 action = inference.get_action(head_img, wrist_img, state)
                 inference_time = time.time() - start_time
 
+                # Construct full action array for this chunk
+                # Shape: (action_horizon, 6)
+                current_action_chunk = np.zeros((args.action_horizon, 6))
+                for i in range(args.action_horizon):
+                    current_action_chunk[i] = np.concatenate(
+                        [np.atleast_1d(action[f"action.{key}"][i]) for key in MODALITY_KEYS],
+                        axis=0
+                    )
+
+                # Temporal Ensembling (Exponential Moving Average)
+                # Blend current prediction with previous prediction shifted by execution steps
+                # Here we simplify: just smooth the transition if we have a previous chunk
+                if prev_action_chunk is not None:
+                    # Blend the first action of new chunk with expectation
+                    # This is a simple low-pass filter on the trajectory start
+                    alpha = 0.8 # Trust new observation 80%
+                    current_action_chunk[0] = alpha * current_action_chunk[0] + (1-alpha) * prev_action_chunk[-1]
+                
+                prev_action_chunk = current_action_chunk
+
+                # Print debug info for first chunk or every 10th chunk
+                if chunk_idx == 0 or chunk_idx % 10 == 0:
+                    print(f"\n[DEBUG] Chunk {chunk_idx}")
+                    print(f"  Task: '{inference.task}'")
+                    print(f"  Current state (6 joints): {np.round(state, 2)}")
+                    print(f"    [shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper]")
+
+                    # Check if current state is within training range
+                    state_names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+                    train_mins = [-48.6, -99.1, -84.5, 23.4, -51.3, 0.0]
+                    train_maxs = [53.2, 64.0, 100.0, 92.4, 31.4, 29.3]
+
+                    out_of_range = []
+                    for i, (name, val, tmin, tmax) in enumerate(zip(state_names, state, train_mins, train_maxs)):
+                        if val < tmin or val > tmax:
+                            out_of_range.append(f"{name}={val:.1f} (range: [{tmin}, {tmax}])")
+
+                    if out_of_range:
+                        print(f"  ⚠️  OUT OF TRAINING RANGE: {out_of_range}")
+                    else:
+                        print(f"  ✓ All joints within training range")
+
+                    # Show predicted actions
+                    print(f"  Predicted Action [0]: {np.round(current_action_chunk[0], 2)}")
+                    print(f"  Predicted Action [-1]: {np.round(current_action_chunk[-1], 2)}")
+
+                    # Show action delta (change from current state)
+                    delta = current_action_chunk[0] - state
+                    print(f"  Action delta (pred - current): {np.round(delta, 2)}")
+
                 # Execute action chunk
                 exec_start = time.time()
                 for action_idx in range(args.action_horizon):
-                    # Concatenate action components
-                    concat_action = np.concatenate(
-                        [np.atleast_1d(action[f"action.{key}"][action_idx]) for key in MODALITY_KEYS],
-                        axis=0,
-                    )
-                    assert concat_action.shape == (6,), f"Expected shape (6,), got {concat_action.shape}"
+                    # Use the (potentially ensembled) action
+                    target_state = current_action_chunk[action_idx]
+                    assert target_state.shape == (6,), f"Expected shape (6,), got {target_state.shape}"
 
                     # Send action to robot
-                    robot.set_target_state(torch.from_numpy(concat_action))
+                    robot.set_target_state(torch.from_numpy(target_state))
                     time.sleep(args.action_interval)
 
                     # Record image if enabled
@@ -682,15 +843,21 @@ def main():
                         image_count += 1
 
                 exec_time = time.time() - exec_start
+                
+                # Calculate control frequency
+                total_loop_time = time.time() - last_inference_time
+                control_freq = 1.0 / total_loop_time if total_loop_time > 0 else 0
+                last_inference_time = time.time()
+
                 if chunk_idx % 10 == 0:
-                    print(f"Chunk {chunk_idx}: inference={inference_time:.3f}s, exec={exec_time:.3f}s")
+                    print(f"Chunk {chunk_idx}: inference={inference_time:.3f}s, exec={exec_time:.3f}s, loop_freq={control_freq:.1f}Hz")
 
         except KeyboardInterrupt:
             print("\n\nInterrupted by user")
 
-        # Return to home
-        print("\nReturning to home position...")
-        robot.go_home()
+        # Return to home safely
+        print("\nReturning to home position (training-aligned)...")
+        robot.go_home(training_aligned=True)
 
     print("\nInference complete!")
     if args.record_imgs:

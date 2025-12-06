@@ -14,6 +14,33 @@
 #   - Comprehensive training report
 #
 # For quick validation first, run: train_groot_mini_mvp.sh
+#
+# RESUME TRAINING (to continue from 5K to 10K steps):
+#   After initial training completes and validates successfully, run:
+#   python scripts/gr00t_finetune.py \
+#       --dataset-path /home/jrobot/project/XLeRobot/datasets_groot \
+#       --output-dir <SAME_OUTPUT_DIR> \
+#       --max-steps 10000 \
+#       --save-steps 500 \
+#       --batch-size 4 \
+#       --learning-rate 1e-4 \
+#       --data-config so100_dualcam \
+#       --video-backend torchvision_av \
+#       --lora-rank 16 \
+#       --no-tune_diffusion_model \
+#       --dataloader_num_workers 16 \
+#       --resume
+#
+# Industry Best Practices (per NVIDIA/HuggingFace):
+#   - --no-tune_diffusion_model: CORRECT - freezes DiT, trains projector with LoRA
+#   - 30 FPS action data: CORRECT - industry standard for GR00T and Pi0.5 (upgraded from 5 FPS)
+#   - batch_size=4: CORRECT for RTX 5090 (24GB VRAM)
+#   - learning_rate=1e-4: CORRECT - industry standard
+#
+# FPS Requirements (per 6_fps_upgrade_30hz.md):
+#   - Action FPS: 30 Hz (synchronized with video)
+#   - Video FPS: 30 fps
+#   - Dataset must be recorded at 30 Hz for optimal training
 ################################################################################
 
 set -e  # Exit on error
@@ -25,11 +52,12 @@ export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 export TOKENIZERS_PARALLELISM=false
 
 # Training configuration (ADJUST THESE)
-MAX_STEPS=5000       # 5K steps (~1 hour)
+MAX_STEPS=5000       # 5K steps (~1 hour). Use --resume to continue to 10K.
 SAVE_STEPS=500       # Save checkpoint every 500 steps (10 checkpoints total)
-BATCH_SIZE=4         # Batch size
+BATCH_SIZE=8         # Batch size (safe for 24GB VRAM)
 LEARNING_RATE=1e-4   # Learning rate (4x higher than default - critical!)
 LORA_RANK=16         # LoRA rank
+NUM_WORKERS=16       # Dataloader workers (per HuggingFace blog recommendation)
 
 echo "========================================================================"
 echo "GR00T MVP LoRA Training - SO-101 Left Arm"
@@ -41,9 +69,12 @@ echo "  - Save every: $SAVE_STEPS steps"
 echo "  - Batch Size: $BATCH_SIZE"
 echo "  - Learning Rate: $LEARNING_RATE"
 echo "  - LoRA Rank: $LORA_RANK"
+echo "  - Dataloader Workers: $NUM_WORKERS"
 echo ""
 echo "Duration: ~50-60 minutes"
 echo "Expected VRAM: 18-20GB"
+echo ""
+echo "To resume training to 10K steps after validation, see header comments."
 echo ""
 echo "Features:"
 echo "  [x] Pre-training dataset verification"
@@ -247,6 +278,7 @@ if command -v unbuffer &> /dev/null; then
         --save-steps $SAVE_STEPS \
         --gradient-accumulation-steps 1 \
         --warmup-ratio 0.05 \
+        --dataloader_num_workers $NUM_WORKERS \
         --report-to tensorboard \
         2>&1 | tee $OUTPUT_DIR/training.log
 else
@@ -264,6 +296,7 @@ else
         --save-steps $SAVE_STEPS \
         --gradient-accumulation-steps 1 \
         --warmup-ratio 0.05 \
+        --dataloader_num_workers $NUM_WORKERS \
         --report-to tensorboard \
         2>&1 | tee $OUTPUT_DIR/training.log
 fi
@@ -504,6 +537,12 @@ python $CUSTOM_SCRIPTS/infer_groot_so101.py \\
 python $CUSTOM_SCRIPTS/evaluate_groot_checkpoint.py \\
     --checkpoint $OUTPUT_DIR/best \\
     --dataset $DATASET_PATH
+
+# Run open-loop evaluation with trajectory plots (30 Hz):
+python $CUSTOM_SCRIPTS/eval_groot_openloop.py \\
+    --checkpoint $OUTPUT_DIR/best \\
+    --dataset $DATASET_PATH \\
+    --plot --trajs 3
 
 # Run diagnosis on best:
 python $CUSTOM_SCRIPTS/diagnose_groot_inference.py \\

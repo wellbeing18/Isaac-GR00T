@@ -5,11 +5,17 @@ Convert LeRobot v3 Dataset to GR00T-compatible Format
 This script bridges the gap between LeRobot v3 dataset format and GR00T's
 expectations (LeRobot v2 format) by converting metadata files.
 
+FPS Configuration (per 6_fps_upgrade_30hz.md):
+    - Action FPS: 30 Hz (synchronized with video)
+    - Video FPS: 30 fps
+    - Dataset should be recorded at 30 Hz for optimal GR00T training
+
 Usage:
     python convert_lerobot_v3_to_groot.py --dataset-path /path/to/dataset --robot-type so101
 
 Author: Claude
 Date: 2025-11-24
+Updated: 2025-12-01 (30 FPS documentation)
 """
 
 import argparse
@@ -81,7 +87,7 @@ def convert_modality_json(dataset_path: Path, robot_type: str, dual_camera: bool
         robot_type: Robot type (so100, so101, etc.)
         dual_camera: Whether to use dual-camera setup
     """
-    print("\n[1/4] Converting modality.json...")
+    print("\n[1/5] Converting modality.json...")
 
     modality_path = dataset_path / "meta" / "modality.json"
 
@@ -126,7 +132,7 @@ def fix_stats_json(dataset_path: Path) -> None:
     Args:
         dataset_path: Path to dataset root
     """
-    print("\n[2/4] Fixing stats.json...")
+    print("\n[2/5] Fixing stats.json...")
 
     stats_path = dataset_path / "meta" / "stats.json"
 
@@ -165,22 +171,68 @@ def fix_stats_json(dataset_path: Path) -> None:
 
 def generate_episodes_jsonl(dataset_path: Path) -> None:
     """
-    Generate episodes.jsonl from info.json.
+    Generate episodes.jsonl from info.json or episodes parquet files.
 
     Args:
         dataset_path: Path to dataset root
     """
-    print("\n[3/4] Generating episodes.jsonl...")
+    print("\n[3/5] Generating episodes.jsonl...")
 
     info_path = dataset_path / "meta" / "info.json"
     episodes_jsonl_path = dataset_path / "meta" / "episodes.jsonl"
+    episodes_parquet_dir = dataset_path / "meta" / "episodes" / "chunk-000"
 
     if not info_path.exists():
         raise FileNotFoundError(f"Required file not found: {info_path}")
 
+    # Try to read from meta/episodes/chunk-000/file-*.parquet first (LeRobot v3)
+    episode_files = sorted(list(episodes_parquet_dir.glob("file-*.parquet")))
+    
+    if episode_files:
+        try:
+            import pandas as pd
+            df_list = []
+            for f in episode_files:
+                df_list.append(pd.read_parquet(f))
+            df = pd.concat(df_list)
+            
+            with open(episodes_jsonl_path, 'w') as f:
+                for _, row in df.iterrows():
+                    episode_data = {
+                        "episode_index": int(row['episode_index']),
+                        "length": int(row['length'])
+                    }
+                    # Add task_index if present
+                    if 'task_index' in row:
+                        episode_data['task_index'] = int(row['task_index'])
+                    else:
+                         # Try to infer or default
+                         episode_data['task_index'] = 0
+
+                    # Add tasks if present (legacy field)
+                    if 'tasks' in row and row['tasks'] is not None:
+                        # tasks might be an array or string in parquet
+                        tasks_val = row['tasks']
+                        if hasattr(tasks_val, 'tolist'): # numpy array
+                             episode_data['tasks'] = tasks_val.tolist()
+                        else:
+                             episode_data['tasks'] = tasks_val
+
+                    f.write(json.dumps(episode_data) + '\n')
+
+            print(f"  ✅ Created: {episodes_jsonl_path.name} (from episodes parquet)")
+            print(f"     Episodes: {len(df)}")
+            return
+
+        except Exception as e:
+            print(f"  ⚠️  Warning: Failed to read episodes parquet: {e}")
+            print(f"     Falling back to info.json")
+
+    # Fallback: Generate from info.json with average length
     info = load_json(info_path)
     total_episodes = info['total_episodes']
     total_frames = info['total_frames']
+    total_tasks = info.get('total_tasks', 1)
 
     # Assume equal distribution for now
     # TODO: Could read from episodes parquet if needed
@@ -188,9 +240,14 @@ def generate_episodes_jsonl(dataset_path: Path) -> None:
 
     with open(episodes_jsonl_path, 'w') as f:
         for episode_index in range(total_episodes):
+            # Simple heuristic for single-task or implicit task assignment
+            # If explicit task mapping is unknown, default to task 0
+            task_index = 0 
+            
             episode_data = {
                 "episode_index": episode_index,
-                "length": frames_per_episode
+                "length": frames_per_episode,
+                "task_index": task_index 
             }
             f.write(json.dumps(episode_data) + '\n')
 
@@ -212,7 +269,7 @@ def generate_tasks_jsonl(dataset_path: Path, task_description: str = "pick red_c
         dataset_path: Path to dataset root
         task_description: Fallback description if tasks.parquet is not available
     """
-    print("\n[4/4] Generating tasks.jsonl...")
+    print("\n[4/5] Generating tasks.jsonl...")
 
     tasks_parquet_path = dataset_path / "meta" / "tasks.parquet"
     tasks_jsonl_path = dataset_path / "meta" / "tasks.jsonl"
@@ -266,7 +323,7 @@ def generate_tasks_jsonl(dataset_path: Path, task_description: str = "pick red_c
 
 def split_parquet_files(dataset_path: Path) -> None:
     """
-    Split consolidated parquet file into per-episode files with reset indices.
+    Split consolidated parquet files into per-episode files with reset indices.
 
     This is CRITICAL for GR00T - it expects:
     - Per-episode parquet files (episode_000.parquet, episode_001.parquet, etc.)
@@ -285,10 +342,12 @@ def split_parquet_files(dataset_path: Path) -> None:
         return
 
     data_dir = dataset_path / 'data' / 'chunk-000'
-    consolidated_file = data_dir / 'file-000.parquet'
+    
+    # Search for all file-*.parquet files
+    input_files = sorted(list(data_dir.glob('file-*.parquet')))
 
-    if not consolidated_file.exists():
-        print(f"  ℹ️  No consolidated file found at {consolidated_file}")
+    if not input_files:
+        print(f"  ℹ️  No consolidated parquet files found in {data_dir}")
         print(f"     Checking if files are already split...")
 
         # Check if already split
@@ -301,8 +360,19 @@ def split_parquet_files(dataset_path: Path) -> None:
             print(f"  ⚠️  No parquet files found!")
             return
 
-    print(f"  📂 Reading: {consolidated_file.name}")
-    df = pd.read_parquet(consolidated_file)
+    print(f"  📂 Reading {len(input_files)} parquet files...")
+    
+    # Read all chunks and concatenate
+    # Note: This assumes dataset fits in memory (LeRobot chunks are usually small enough)
+    df_list = []
+    for f in input_files:
+        df_list.append(pd.read_parquet(f))
+    
+    if not df_list:
+        print("  ⚠️  Empty file list after glob?")
+        return
+
+    df = pd.concat(df_list)
 
     total_rows = len(df)
     episodes = sorted(df['episode_index'].unique())
@@ -328,13 +398,16 @@ def split_parquet_files(dataset_path: Path) -> None:
     if split_count > 3:
         print(f"     ... (+ {split_count - 3} more files)")
 
-    # Optionally backup the original consolidated file
-    backup_consolidated = data_dir / 'file-000.parquet.original'
-    if not backup_consolidated.exists():
-        shutil.copy2(consolidated_file, backup_consolidated)
-        print(f"  📦 Backed up: {backup_consolidated.name}")
-
-    print(f"\n  💡 TIP: You can delete {consolidated_file.name} to save space")
+    # Optionally backup the original consolidated files
+    # Only backup if we haven't already (to avoid backing up twice)
+    for f in input_files:
+        backup_path = f.with_suffix(f.suffix + '.original')
+        if not backup_path.exists():
+            shutil.copy2(f, backup_path)
+            # print(f"  📦 Backed up: {backup_path.name}")
+    
+    print(f"  📦 Backed up original files to *.parquet.original")
+    print(f"\n  💡 TIP: You can delete file-*.parquet to save space")
     print(f"          The per-episode files contain all the data")
 
 

@@ -10,6 +10,15 @@ Evaluate GR00T checkpoints on training data to compute:
 
 Similar to Pi0.5's evaluate_checkpoint.py
 
+FPS Configuration (per 6_fps_upgrade_30hz.md):
+    - Action FPS: 30 Hz (synchronized with video)
+    - Video FPS: 30 fps
+    - Dataset should be recorded at 30 Hz for evaluation
+
+For open-loop evaluation with trajectory plots, use eval_groot_openloop.py which
+integrates with the official NVIDIA eval_policy.py to provide MSE metrics and
+visual trajectory comparisons.
+
 Usage:
     # Evaluate all checkpoints in a training directory
     python evaluate_groot_checkpoint.py --training-dir /path/to/outputs/groot_5k_lora_xxx
@@ -25,9 +34,14 @@ import argparse
 import json
 import os
 import sys
+import warnings
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import traceback
+
+# Suppress torchvision video deprecation warnings
+warnings.filterwarnings("ignore", message=".*video decoding and encoding capabilities.*")
+warnings.filterwarnings("ignore", message=".*albumentations.*")
 
 import numpy as np
 import torch
@@ -38,9 +52,14 @@ from tqdm import tqdm
 JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
 
-def load_dataset_samples(dataset_path: Path, num_samples: int = 300) -> List[Dict]:
+def load_dataset_samples(
+    dataset_path: Path,
+    num_samples: int = 300,
+    data_config: str = "so100_dualcam",
+    embodiment_tag: str = "new_embodiment",
+) -> List[Dict]:
     """
-    Load samples from a GR00T dataset.
+    Load samples from a GR00T dataset using LeRobotSingleDataset.
 
     Returns list of dicts with:
     - video.front: (H, W, 3) numpy array
@@ -51,133 +70,89 @@ def load_dataset_samples(dataset_path: Path, num_samples: int = 300) -> List[Dic
     - action.gripper: (1,) numpy array
     - task: str
     """
-    import pyarrow.parquet as pq
-    import decord
-    decord.bridge.set_bridge("numpy")
+    from gr00t.data.dataset import LeRobotSingleDataset
+    from gr00t.experiment.data_config import load_data_config
 
     dataset_path = Path(dataset_path)
 
-    # Load episode metadata
-    episodes_path = dataset_path / "meta" / "episodes.jsonl"
-    episodes = []
-    with open(episodes_path, "r") as f:
-        for line in f:
-            if line.strip():
-                episodes.append(json.loads(line))
+    # Load data config
+    data_cfg = load_data_config(data_config)
+    modality_config = data_cfg.modality_config()
 
-    # Load task descriptions
-    tasks_path = dataset_path / "meta" / "tasks.jsonl"
-    tasks = {}
-    with open(tasks_path, "r") as f:
-        for line in f:
-            if line.strip():
-                task = json.loads(line)
-                tasks[task["task_index"]] = task["task"]
+    # Load dataset using GR00T's loader (handles chunked videos, AV1 codec, etc.)
+    dataset = LeRobotSingleDataset(
+        dataset_path=str(dataset_path),
+        modality_configs=modality_config,
+        video_backend="torchvision_av",  # Supports AV1 codec
+        video_backend_kwargs=None,
+        transforms=None,
+        embodiment_tag=embodiment_tag,
+    )
 
-    # Collect samples from parquet files
-    samples = []
-    data_dir = dataset_path / "data"
-    videos_dir = dataset_path / "videos"
+    print(f"Dataset loaded: {len(dataset)} samples from {len(dataset.trajectory_lengths)} trajectories")
 
-    # Gather all frame indices across episodes
-    all_frames = []
-    for ep in episodes:
-        ep_idx = ep["episode_index"]
-        ep_length = ep["length"]
-        task_idx = ep.get("task_index", 0)
-        task_desc = tasks.get(task_idx, "unknown task")
-
-        for frame_idx in range(ep_length - 1):  # -1 because we need next action
-            all_frames.append({
-                "episode_index": ep_idx,
-                "frame_index": frame_idx,
-                "task_index": task_idx,
-                "task": task_desc,
-            })
-
-    # Sample frames
-    if len(all_frames) > num_samples:
+    # Sample random indices
+    total_samples = len(dataset)
+    if total_samples > num_samples:
         np.random.seed(42)  # For reproducibility
-        sample_indices = np.random.choice(len(all_frames), num_samples, replace=False)
-        sampled_frames = [all_frames[i] for i in sample_indices]
+        sample_indices = np.random.choice(total_samples, num_samples, replace=False)
     else:
-        sampled_frames = all_frames
+        sample_indices = list(range(total_samples))
 
     # Load each sample
-    print(f"Loading {len(sampled_frames)} samples from dataset...")
+    print(f"Loading {len(sample_indices)} samples from dataset...")
+    samples = []
 
-    # Cache video readers
-    video_cache = {}
-
-    for frame_info in tqdm(sampled_frames, desc="Loading samples"):
-        ep_idx = frame_info["episode_index"]
-        frame_idx = frame_info["frame_index"]
-
+    for idx in tqdm(sample_indices, desc="Loading samples"):
         try:
-            # Load parquet data
-            parquet_file = data_dir / f"episode_{ep_idx:06d}.parquet"
-            if not parquet_file.exists():
-                continue
+            # Get sample from dataset
+            obs = dataset[idx]
 
-            table = pq.read_table(parquet_file)
-            df = table.to_pandas()
+            # Extract video frames (shape: [1, H, W, 3] -> [H, W, 3])
+            front_frame = obs["video.front"][0]
+            if isinstance(front_frame, torch.Tensor):
+                front_frame = front_frame.numpy()
 
-            if frame_idx >= len(df):
-                continue
+            wrist_frame = obs["video.wrist"][0]
+            if isinstance(wrist_frame, torch.Tensor):
+                wrist_frame = wrist_frame.numpy()
 
-            row = df.iloc[frame_idx]
+            # Extract state (shape: [1, N] -> [N,])
+            state_arm = obs["state.single_arm"][0]
+            if isinstance(state_arm, torch.Tensor):
+                state_arm = state_arm.numpy()
 
-            # Load state
-            state_arm = np.array(row["observation.state"][:5], dtype=np.float32)
-            state_gripper = np.array([row["observation.state"][5]], dtype=np.float32)
+            state_gripper = obs["state.gripper"][0]
+            if isinstance(state_gripper, torch.Tensor):
+                state_gripper = state_gripper.numpy()
 
-            # Load action (use current frame's action as target)
-            action_arm = np.array(row["action"][:5], dtype=np.float32)
-            action_gripper = np.array([row["action"][5]], dtype=np.float32)
+            # Extract action - use first action from horizon (shape: [horizon, N] -> [N,])
+            action_arm = obs["action.single_arm"][0]
+            if isinstance(action_arm, torch.Tensor):
+                action_arm = action_arm.numpy()
 
-            # Load video frames
-            front_video_path = videos_dir / f"observation.images.front_episode_{ep_idx:06d}.mp4"
-            wrist_video_path = videos_dir / f"observation.images.wrist_episode_{ep_idx:06d}.mp4"
+            action_gripper = obs["action.gripper"][0]
+            if isinstance(action_gripper, torch.Tensor):
+                action_gripper = action_gripper.numpy()
 
-            # Try alternative naming conventions
-            if not front_video_path.exists():
-                front_video_path = videos_dir / f"front_episode_{ep_idx:06d}.mp4"
-            if not wrist_video_path.exists():
-                wrist_video_path = videos_dir / f"wrist_episode_{ep_idx:06d}.mp4"
-
-            if not front_video_path.exists() or not wrist_video_path.exists():
-                continue
-
-            # Get or create video readers
-            front_key = str(front_video_path)
-            wrist_key = str(wrist_video_path)
-
-            if front_key not in video_cache:
-                video_cache[front_key] = decord.VideoReader(front_key)
-            if wrist_key not in video_cache:
-                video_cache[wrist_key] = decord.VideoReader(wrist_key)
-
-            front_vr = video_cache[front_key]
-            wrist_vr = video_cache[wrist_key]
-
-            if frame_idx >= len(front_vr) or frame_idx >= len(wrist_vr):
-                continue
-
-            front_frame = front_vr[frame_idx].asnumpy()
-            wrist_frame = wrist_vr[frame_idx].asnumpy()
+            # Get task description
+            task = obs.get("annotation.human.task_description", ["unknown task"])
+            if isinstance(task, list):
+                task = task[0] if task else "unknown task"
 
             samples.append({
-                "video.front": front_frame,
-                "video.wrist": wrist_frame,
-                "state.single_arm": state_arm,
-                "state.gripper": state_gripper,
-                "action.single_arm": action_arm,
-                "action.gripper": action_gripper,
-                "task": frame_info["task"],
+                "video.front": front_frame.astype(np.uint8),
+                "video.wrist": wrist_frame.astype(np.uint8),
+                "state.single_arm": state_arm.astype(np.float32),
+                "state.gripper": state_gripper.astype(np.float32),
+                "action.single_arm": action_arm.astype(np.float32),
+                "action.gripper": action_gripper.astype(np.float32),
+                "task": task,
             })
 
         except Exception as e:
-            continue  # Skip problematic samples
+            # Skip problematic samples silently
+            continue
 
     print(f"Loaded {len(samples)} valid samples")
     return samples
@@ -318,7 +293,7 @@ def evaluate_checkpoint(
     print(f"{'='*70}")
 
     # Load samples
-    samples = load_dataset_samples(dataset_path, num_samples)
+    samples = load_dataset_samples(dataset_path, num_samples, data_config)
     if len(samples) == 0:
         print("ERROR: No valid samples loaded")
         return {"error": "No samples loaded"}

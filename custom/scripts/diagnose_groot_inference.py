@@ -36,7 +36,7 @@ def load_sample_frames(dataset_path: Path, num_samples: int = 5) -> List[Dict]:
     """Load sample frames from the dataset."""
     import pyarrow.parquet as pq
     import decord
-    decord.bridge.set_bridge("numpy")
+    decord.bridge.set_bridge("native")
 
     dataset_path = Path(dataset_path)
     samples = []
