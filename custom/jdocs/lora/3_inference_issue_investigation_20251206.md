@@ -42,6 +42,7 @@
    - [Infrastructure: COMPLETE](#infrastructure--complete)
    - [Model Quality: Incremental Verification Plan](#model-quality--needs-work---incremental-verification-plan)
    - [Understanding Closed-Loop Validation](#understanding-closed-loop-validation)
+   - [Retraining Scenarios](#retraining-scenarios-when-can-you-reuse-checkpoints)
 10. [Summary of Investigation](#summary-of-investigation)
 11. [Appendix: Reference Links](#appendix-reference-links)
 
@@ -1545,6 +1546,52 @@ If incremental training doesn't improve error ratio:
 3. **Different training recipe**
    - Try higher learning rate in later steps
    - Adjust warmup schedule
+
+#### Retraining Scenarios: When Can You Reuse Checkpoints?
+
+| Scenario | Can Reuse Checkpoint? | Method |
+|----------|----------------------|--------|
+| Same data, more steps | ✅ Yes | `--resume` flag |
+| New/more data, same LoRA rank | ✅ Yes | Load as base model (no `--resume`) |
+| Different LoRA rank | ❌ No | Retrain from scratch |
+
+**Why LoRA rank change requires retraining:**
+- LoRA adds matrices A (d × r) and B (r × k) where r = rank
+- Rank 16: A is d×16, B is 16×k
+- Rank 32: A is d×32, B is 32×k
+- Dimensions don't match → can't load rank-16 weights into rank-32 model
+
+**Adding More Data (Same LoRA Rank):**
+
+Option A: Resume training (quick, but may overfit to new data)
+```bash
+# Combine old + new data first
+python custom/scripts/combine_groot_datasets.py \
+    --datasets /path/to/old_data /path/to/new_data \
+    --output /path/to/combined_data
+
+# Resume from checkpoint with combined dataset
+python -W ignore scripts/gr00t_finetune.py \
+    --dataset-path /path/to/combined_data \
+    --output-dir .../existing_training_dir \
+    --max-steps 35000 \
+    --resume \
+    ...
+```
+
+Option B: Fresh training with checkpoint initialization (recommended)
+```bash
+# Start new training, initialize from existing checkpoint
+python -W ignore scripts/gr00t_finetune.py \
+    --dataset-path /path/to/combined_data \
+    --output-dir .../new_training_dir \
+    --max-steps 25000 \
+    --base-model-path .../existing_checkpoint \
+    ...
+    # NO --resume flag
+```
+- ✅ Fresh optimizer state, proper data shuffling
+- ✅ Model sees all data (old + new) with equal probability
 
 ---
 
