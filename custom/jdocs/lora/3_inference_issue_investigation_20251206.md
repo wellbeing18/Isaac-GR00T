@@ -1374,6 +1374,8 @@ python -W ignore scripts/gr00t_finetune.py \
 
 > **Note**: Uses `--resume` flag with same `--output-dir` as original training. The script will continue from the last checkpoint (5000 steps) to 10000 steps.
 
+> **WARNING**: By default, `save_total_limit=5` deletes old checkpoints! Use `--save-total-limit -1` to keep all checkpoints when resuming.
+
 ##### Step 2: Run Closed-Loop Simulation at 10K Checkpoint
 
 **Command**:
@@ -1411,11 +1413,11 @@ python custom/scripts/diagnose_closed_loop_sim.py \
 cd /home/jrobot/project/Isaac-GR00T
 
 # Only if 10K shows measurable improvement in error ratio
-python scripts/gr00t_finetune.py \
+python -W ignore scripts/gr00t_finetune.py \
     --dataset-path /home/jrobot/project/XLeRobot/datasets_groot \
     --output-dir /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251204_215410259 \
     --max-steps 25000 \
-    --save-steps 1000 \
+    --save-steps 2500 \
     --batch-size 8 \
     --learning-rate 1e-4 \
     --data-config so100_dualcam \
@@ -1424,6 +1426,7 @@ python scripts/gr00t_finetune.py \
     --no-tune_diffusion_model \
     --dataloader_num_workers 16 \
     --report-to tensorboard \
+    --save-total-limit -1 \
     --resume
 ```
 

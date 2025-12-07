@@ -66,6 +66,9 @@ class ArgsConfig:
     save_steps: int = 1000
     """Number of steps between saving checkpoints."""
 
+    save_total_limit: int = 5
+    """Maximum number of checkpoints to keep. Older checkpoints are deleted. Set to -1 to keep all."""
+
     # Model parameters
     base_model_path: str = "nvidia/GR00T-N1.5-3B"
     """Path or HuggingFace model ID for the base model."""
@@ -371,7 +374,7 @@ def main(config: ArgsConfig):
         save_strategy="steps",
         save_steps=config.save_steps,
         # evaluation_strategy="no",
-        save_total_limit=5,
+        save_total_limit=config.save_total_limit if config.save_total_limit > 0 else None,
         report_to=config.report_to,
         seed=42,
         do_eval=False,
