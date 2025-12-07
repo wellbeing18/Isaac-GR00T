@@ -1,9 +1,9 @@
 # GR00T SO101 Inference Issue Investigation
 
 **Date**: 2025-12-06
-**Status**: ROOT CAUSE IDENTIFIED 🔴 | Camera Viewpoint Incompatibility
+**Status**: ROOT CAUSE IDENTIFIED 🔴 | Infrastructure Fixed ✅
 **Problem**: Training metrics and evaluation results look good, but real robot inference performance is poor.
-**Root Cause**: Head camera is positioned on SAME SIDE as arm (first-person), but GR00T's frozen vision model expects OPPOSITE SIDE (third-person) views for arm manipulation tasks.
+**Root Cause**: Camera viewpoint incompatibility - head camera on same side as arm, but GR00T expects opposite side views.
 
 ---
 
@@ -14,41 +14,41 @@
    - [Key Finding](#key-finding)
    - [NVIDIA Reference vs Our Implementation](#nvidia-reference-vs-our-implementation)
    - [Root Cause Summary](#root-cause-summary)
-2. [Pipeline Comparison](#pipeline-comparison)
+2. [Critical Finding: Camera Viewpoint Incompatibility](#critical-finding-camera-viewpoint-incompatibility)
+   - [The Discovery](#the-discovery)
+   - [GR00T LoRA Architecture Analysis](#groot-lora-architecture-analysis)
+   - [Training Results (No Improvement at 25K)](#training-results-no-improvement-at-25k)
+   - [Recommended Solutions](#recommended-solutions)
+   - [Decision Matrix](#decision-matrix)
+3. [Pipeline Comparison](#pipeline-comparison)
    - [Evaluation Pipeline (Open-Loop)](#evaluation-pipeline-open-loop)
    - [Real Inference Pipeline (Closed-Loop)](#real-inference-pipeline-closed-loop)
-3. [Timing Comparison](#timing-comparison)
-4. [Error Accumulation Analysis](#error-accumulation-analysis)
+4. [Timing Comparison](#timing-comparison)
+5. [Error Accumulation Analysis](#error-accumulation-analysis)
    - [Why Open-Loop MSE Looks Good But Closed-Loop Fails](#why-open-loop-mse-looks-good-but-closed-loop-fails)
-5. [Identified Issues](#identified-issues)
+6. [Identified Issues](#identified-issues)
    - [Issue 0: Blocking Architecture (CRITICAL)](#issue-0-blocking-stop-and-go-architecture-critical---from-gemini-analysis)
    - [Issue 1: Camera Corruption (CRITICAL)](#issue-1-camera-corruption-during-inference-critical)
    - [Issue 2: Timing Mismatch (HIGH)](#issue-2-timing-mismatch-high)
    - [Issue 3: Per-Joint Error Distribution (HIGH)](#issue-3-per-joint-error-distribution-high)
    - [Issue 4: Weak Temporal Ensembling (HIGH)](#issue-4-weak-temporal-ensembling-high---from-gemini-analysis)
    - [Issue 5: Denoising Steps (MEDIUM)](#issue-5-denoising-steps-medium)
-6. [Diagnostic Test Steps](#diagnostic-test-steps-run-in-order)
+7. [Diagnostic Test Steps](#diagnostic-test-steps-run-in-order)
    - [Step 1: Async Throughput Test](#step-1-async-throughput-test-5-minutes--start-here)
    - [Step 2: Camera Corruption Test](#step-2-camera-corruption-test-10-minutes)
    - [Step 3: Closed-Loop Simulation](#step-3-closed-loop-simulation-10-minutes)
-7. [Diagnosis Results](#diagnosis-results)
+8. [Diagnosis Results](#diagnosis-results)
    - [Result 1: Async Throughput Test](#result-1-async-throughput-test-2025-12-06)
    - [Result 2: Camera Corruption Test](#result-2-camera-corruption-test)
    - [Result 3: Camera Corruption Fix - MJPEG](#result-3-camera-corruption-fix---mjpeg-compression)
    - [Result 4: Current Performance Status](#result-4-current-performance-status-post-fix)
    - [Result 5: Closed-Loop Simulation](#result-5-closed-loop-simulation---critical-finding)
    - [Result 6: Temporal Ensembling Test](#result-6-temporal-ensembling-real-robot-test)
-8. [Diagnostic Experiments (Detailed)](#diagnostic-experiments-detailed)
-9. [Next Steps](#next-steps-priority-order)
-   - [Infrastructure: COMPLETE](#infrastructure--complete)
-   - [Model Quality: Incremental Verification Plan](#model-quality--needs-work---incremental-verification-plan)
-   - [Understanding Closed-Loop Validation](#understanding-closed-loop-validation)
-   - [Retraining Scenarios](#retraining-scenarios-when-can-you-reuse-checkpoints)
-10. [Critical Finding: Camera Viewpoint Incompatibility](#critical-finding-camera-viewpoint-incompatibility)
-    - [GR00T Pretraining Data Analysis](#gr00t-n15-pretraining-data-analysis)
-    - [Why This Matters: Frozen Vision Model](#why-this-matters-frozen-vision-model)
-    - [GR00T vs Pi0.5 Architecture](#comparison-gr00t-vs-pi05-architecture)
-    - [Recommended Solutions](#recommended-solutions-priority-order)
+9. [Diagnostic Experiments (Detailed)](#diagnostic-experiments-detailed)
+10. [Next Steps](#next-steps-priority-order)
+    - [Infrastructure: COMPLETE](#infrastructure--complete)
+    - [Model Quality: Incremental Verification Plan](#model-quality--needs-work---incremental-verification-plan)
+    - [Understanding Closed-Loop Validation](#understanding-closed-loop-validation)
 11. [Summary of Investigation](#summary-of-investigation)
 12. [Appendix: Reference Links](#appendix-reference-links)
 
@@ -106,6 +106,137 @@ The `infer_groot_so101.py` was built as a self-contained script but deviated fro
 | Error accumulation | None (each step independent) | Compounds over time |
 | Camera input | Pre-recorded (perfect) | Real-time (potential corruption) |
 | Timing | Unbounded | Real-time constraints |
+
+---
+
+## Critical Finding: Camera Viewpoint Incompatibility
+
+**Date**: 2025-12-06
+**Status**: 🔴 ROOT CAUSE IDENTIFIED
+
+### The Discovery
+
+Through systematic investigation and online research, we discovered a fundamental incompatibility between our camera setup and GR00T's pretraining data:
+
+| Aspect | Our Setup | GR00T Pretraining Data |
+|--------|-----------|------------------------|
+| Head camera position | **Same side** as arm (behind/first-person) | **Opposite side** (third-person, facing workspace) |
+| Visual perspective | Looking over the arm toward target | Looking at arm and target from across the table |
+| Data sources | Custom SO101 data | Open X-Embodiment, DROID, Bridge V2, RT-1 |
+
+**Visual Evidence from Training Data**:
+- `custom/logs/dataset_head_frame.jpg` - Shows camera positioned behind the arm
+- `custom/logs/dataset_wrist_frame.jpg` - Standard wrist camera view (this is fine)
+
+### GR00T LoRA Architecture Analysis
+
+**Critical: GR00T LoRA keeps vision model FROZEN**
+
+From `scripts/gr00t_finetune.py` default configuration:
+```python
+tune_llm: bool = False           # Language model FROZEN
+tune_visual: bool = False        # Vision encoder FROZEN ← CRITICAL
+tune_projector: bool = True      # Trained
+tune_diffusion_model: bool = True  # Trained (action head)
+```
+
+**Implications**:
+1. The frozen vision encoder was pretrained on **third-person views** (Open X-Embodiment)
+2. It extracts visual features expecting to see the workspace from across the table
+3. Our first-person/behind-arm view provides fundamentally different visual features
+4. LoRA only trains the action head, which cannot compensate for wrong visual features
+5. **More training will NOT fix this** - the visual representation is fundamentally misaligned
+
+**Comparison with Pi0.5 Architecture** (which CAN adapt to new viewpoints):
+```python
+# Pi0.5 applies LoRA to BOTH VL and action models:
+peft_lang_model = get_peft_model(lang_model, lora_config)    # VL adapted
+peft_expert_model = get_peft_model(expert_model, lora_config)  # Action adapted
+```
+
+Pi0.5 can learn new viewpoints because it adapts the vision-language model. GR00T cannot.
+
+### Training Results (No Improvement at 25K)
+
+We trained incrementally to verify this hypothesis:
+
+| Checkpoint | Open-Loop MSE | Closed-Loop Error Ratio | Notes |
+|------------|---------------|-------------------------|-------|
+| 5K steps | 19.5° | **19.6x** | Initial training |
+| 10K steps | ~18° | **16.2x** | Slight improvement |
+| 25K steps | **15.6°** | **19.7x** | Back to 5K level |
+
+**Analysis**:
+- Open-loop MSE improved slightly (model memorizes trajectories better)
+- Closed-loop error ratio remained at ~19x (no improvement in robustness)
+- This confirms the model cannot generalize because visual features are wrong
+
+### Recommended Solutions
+
+#### Option 1: Relocate Camera to Opposite Side (RECOMMENDED)
+
+**Pros**:
+- Most compatible with GR00T's pretrained visual understanding
+- No code changes required
+- Aligns with standard SO100/SO101 setups used in NVIDIA examples
+
+**Cons**:
+- Requires recollecting all training data
+- Hardware setup change
+
+**Implementation**:
+```
+Current Setup:              Recommended Setup:
+
+     [Camera]                     [Target]
+        |                            |
+        v                            v
+   [Robot Arm]               [Robot Arm]   [Camera]
+        |                            |         |
+        v                            v         v
+    [Target]                   (Camera views arm from opposite side)
+```
+
+#### Option 2: Use Pi0.5 Instead of GR00T
+
+**Pros**:
+- Pi0.5 applies LoRA to vision-language model (can adapt to new viewpoints)
+- Same training data can be used
+- No hardware changes required
+
+**Cons**:
+- Different model architecture to learn
+- May require different data format
+
+**Reference**: `/home/jrobot/project/lerobot/src/lerobot/policies/pi05/modeling_pi05.py`
+
+#### Option 3: Enable `--tune-visual` in GR00T (EXPERIMENTAL)
+
+**Pros**:
+- Can potentially adapt vision encoder to new viewpoint
+- Uses existing setup
+
+**Cons**:
+- Significantly higher VRAM requirements (60GB+ vs 18-20GB)
+- May destabilize pretrained representations
+- Not officially recommended by NVIDIA
+
+**Command**:
+```bash
+python scripts/gr00t_finetune.py \
+    --dataset-path /path/to/data \
+    --tune-visual  # Enable vision encoder training
+    # ... other args
+```
+
+### Decision Matrix
+
+| Solution | Effort | Risk | Compatibility | Recommended |
+|----------|--------|------|---------------|-------------|
+| Relocate camera | Medium (recollect data) | Low | High | ✅ **Yes** |
+| Use Pi0.5 | Medium (new model) | Medium | Medium | ✅ Yes |
+| Enable --tune-visual | Low (flag change) | High | Unknown | ⚠️ Experimental |
+| Continue current approach | None | N/A | N/A | ❌ Won't work |
 
 ---
 
@@ -1364,19 +1495,20 @@ cd /home/jrobot/project/Isaac-GR00T
 
 # Resume from the 5K checkpoint to reach 10K (per train_groot_mvp.sh header)
 python -W ignore scripts/gr00t_finetune.py \
-    --dataset-path /home/jrobot/project/XLeRobot/datasets_groot \
-    --output-dir /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251204_215410259 \
-    --max-steps 10000 \
-    --save-steps 500 \
-    --batch-size 8 \
-    --learning-rate 1e-4 \
-    --data-config so100_dualcam \
-    --video-backend torchvision_av \
-    --lora-rank 16 \
-    --no-tune_diffusion_model \
-    --dataloader_num_workers 16 \
-    --report-to tensorboard \
-    --resume
+      --dataset-path /home/jrobot/project/XLeRobot/datasets_groot \
+      --output-dir /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251204_215410259 \
+      --max-steps 25000 \
+      --save-steps 2000 \
+      --batch-size 8 \
+      --learning-rate 1e-4 \
+      --data-config so100_dualcam \
+      --video-backend torchvision_av \
+      --lora-rank 16 \
+      --no-tune_diffusion_model \
+      --dataloader_num_workers 16 \
+      --report-to tensorboard \
+      --save-total-limit -1 \
+      --resume
 ```
 
 > **Note**: Uses `--resume` flag with same `--output-dir` as original training. The script will continue from the last checkpoint (5000 steps) to 10000 steps.
@@ -1553,157 +1685,6 @@ If incremental training doesn't improve error ratio:
    - Try higher learning rate in later steps
    - Adjust warmup schedule
 
-#### Retraining Scenarios: When Can You Reuse Checkpoints?
-
-| Scenario | Can Reuse Checkpoint? | Method |
-|----------|----------------------|--------|
-| Same data, more steps | ✅ Yes | `--resume` flag |
-| New/more data, same LoRA rank | ✅ Yes | Load as base model (no `--resume`) |
-| Different LoRA rank | ❌ No | Retrain from scratch |
-
-**Why LoRA rank change requires retraining:**
-- LoRA adds matrices A (d × r) and B (r × k) where r = rank
-- Rank 16: A is d×16, B is 16×k
-- Rank 32: A is d×32, B is 32×k
-- Dimensions don't match → can't load rank-16 weights into rank-32 model
-
-**Adding More Data (Same LoRA Rank):**
-
-Option A: Resume training (quick, but may overfit to new data)
-```bash
-# Combine old + new data first
-python custom/scripts/combine_groot_datasets.py \
-    --datasets /path/to/old_data /path/to/new_data \
-    --output /path/to/combined_data
-
-# Resume from checkpoint with combined dataset
-python -W ignore scripts/gr00t_finetune.py \
-    --dataset-path /path/to/combined_data \
-    --output-dir .../existing_training_dir \
-    --max-steps 35000 \
-    --resume \
-    ...
-```
-
-Option B: Fresh training with checkpoint initialization (recommended)
-```bash
-# Start new training, initialize from existing checkpoint
-python -W ignore scripts/gr00t_finetune.py \
-    --dataset-path /path/to/combined_data \
-    --output-dir .../new_training_dir \
-    --max-steps 25000 \
-    --base-model-path .../existing_checkpoint \
-    ...
-    # NO --resume flag
-```
-- ✅ Fresh optimizer state, proper data shuffling
-- ✅ Model sees all data (old + new) with equal probability
-
----
-
-## Critical Finding: Camera Viewpoint Incompatibility
-
-### The Root Cause Identified
-
-After extensive research, we identified that **camera placement is the fundamental issue**, not training duration or model capacity.
-
-### GR00T N1.5 Pretraining Data Analysis
-
-**For Robot ARM Manipulation (Open X-Embodiment datasets):**
-
-| Dataset | Primary Camera | Viewpoint Type | Source |
-|---------|---------------|----------------|--------|
-| **DROID** | 2x external Zed 2 + 1x wrist | **Third-person** (external facing workspace) | [droid-dataset.github.io](https://droid-dataset.github.io/) |
-| **Bridge V2** | "Over-the-shoulder" fixed camera | **Third-person** - "For training, they use only the over-the-shoulder camera view" | [rail-berkeley.github.io](https://rail-berkeley.github.io/bridgedata/) |
-| **RT-1** | Robot head camera facing workspace | **Third-person** (looking down at workspace) | [robotics-transformer1.github.io](https://robotics-transformer1.github.io/) |
-
-**For Humanoid Robots (GR-1 internal data):**
-
-| Dataset | Camera | Viewpoint Type |
-|---------|--------|----------------|
-| **GR-1 Humanoid** | "head-mounted camera" | **First-person/Egocentric** |
-| **Human Videos (Ego4D, etc.)** | Head-mounted | **First-person/Egocentric** |
-
-### Our Setup vs GR00T Pretraining
-
-| Aspect | GR00T Pretraining (Arm Manipulation) | Our Setup |
-|--------|--------------------------------------|-----------|
-| Camera position | **Opposite side** (facing arm from front) | **Same side** (behind arm) |
-| What model expects | See gripper approaching object FROM FRONT | See arm blocking view of target |
-| Spatial cues | Clear gripper-to-object relationship | Arm occludes target during approach |
-
-### Why This Matters: Frozen Vision Model
-
-GR00T LoRA finetuning configuration:
-```python
-tune_llm: bool = False      # Language model FROZEN
-tune_visual: bool = False   # Vision encoder FROZEN
-tune_projector: bool = True # Trained
-tune_diffusion_model: bool = True  # Trained (action head)
-```
-
-**The Problem:**
-1. Vision encoder is **FROZEN** during LoRA finetuning
-2. Frozen VL extracts features based on **pretraining viewpoint distribution**
-3. Pretraining for arm manipulation uses **third-person/opposite-side** views
-4. Our "behind-arm" view produces **incompatible visual features**
-5. Action model receives **wrong features** → no amount of training helps
-
-### Visual Evidence
-
-Training data camera views extracted:
-- **Head camera**: Shows arm in foreground, partially blocking workspace (same-side view)
-- **Wrist camera**: Standard gripper-mounted view (correct)
-
-The head camera viewpoint is fundamentally different from what GR00T's vision model expects for arm manipulation tasks.
-
-### Comparison: GR00T vs Pi0.5 Architecture
-
-| Component | GR00T LoRA (Default) | Pi0.5 LoRA |
-|-----------|---------------------|------------|
-| Vision Encoder | ❌ **FROZEN** | ✅ **TRAINED** (via PaliGemma LoRA) |
-| Language Model | ❌ **FROZEN** | ✅ **TRAINED** (via PaliGemma LoRA) |
-| Action Head | ✅ Trained (DiT) | ✅ Trained (Gemma Expert) |
-
-Pi0.5 LoRA finetunes BOTH the vision-language model AND the action model, allowing it to adapt to new camera viewpoints.
-
-### Recommended Solutions (Priority Order)
-
-1. **Relocate camera to opposite side** (Most compatible)
-   - Move head camera to face the arm from across the workspace
-   - Matches GR00T pretraining distribution
-   - Requires re-collecting training data
-
-2. **Try Pi0.5 instead of GR00T** (If camera relocation not possible)
-   - Pi0.5 LoRA can adapt vision model to new viewpoints
-   - See: `/home/jrobot/project/lerobot/src/lerobot/policies/pi05/`
-
-3. **Enable `--tune-visual` in GR00T** (Experimental)
-   - Flag exists but not documented by NVIDIA
-   - Significantly increases VRAM requirements (~35-40GB+)
-   - May cause OOM on RTX 5090 (32GB)
-
-### Why More Training Didn't Help
-
-| Checkpoint | Open-loop MSE | Closed-loop MSE | Error Ratio |
-|------------|---------------|-----------------|-------------|
-| 5K | 19.5° | 382° | 19.6x |
-| 10K | 19.0° | 307° | 16.2x |
-| 25K | 12.4° | 244° | **19.7x** (no improvement) |
-
-The error ratio returned to 5K levels at 25K steps, indicating:
-- Model learned to memorize training data better (lower open-loop MSE)
-- But cannot generalize because visual features are fundamentally wrong
-- This is classic **overfitting to wrong features**
-
-### References
-
-- [Open X-Embodiment Dataset](https://robotics-transformer-x.github.io/) - "RT-X models trained to take in **third-person camera images**"
-- [DROID Dataset](https://droid-dataset.github.io/) - 2 external third-person cameras
-- [BridgeData V2](https://rail-berkeley.github.io/bridgedata/) - "Over-the-shoulder" primary view
-- [GR00T N1 Paper](https://arxiv.org/html/2503.14734v2) - Pretraining data sources
-- [VLA Viewpoint Sensitivity](https://arxiv.org/html/2509.14117v3) - "VLA methods struggle even with minor changes in camera viewpoints"
-
 ---
 
 ## Summary of Investigation
@@ -1714,20 +1695,14 @@ The error ratio returned to 5K levels at 25K steps, indicating:
 |------|---------|--------|
 | 2025-12-06 AM | Blocking architecture causes 27% dead time | Created async inference script |
 | 2025-12-06 PM | Camera images corrupted (USB bandwidth) | Fixed with MJPEG compression |
-| 2025-12-06 PM | Infrastructure working, model behavior poor | Investigated further |
-| 2025-12-06 PM | Closed-loop simulation shows 19.6x error ratio | Confirmed open-loop overfitting |
-| 2025-12-06 PM | 10K training shows slight improvement (16.2x) | Continued to 25K |
-| 2025-12-06 PM | 25K training shows NO improvement (19.7x) | Investigated root cause |
-| 2025-12-06 EVE | **ROOT CAUSE: Camera viewpoint incompatibility** | **Identified fundamental issue** |
+| 2025-12-06 PM | Infrastructure working, model behavior poor | **Current state** |
 
 ### Key Learnings
 
 1. **Always use MJPEG** for USB 2.0 cameras with multiple cameras
 2. **Async architecture** eliminates stop-go jerkiness
 3. **Match training settings** - inference should use same FPS, resolution, normalization
-4. **Camera viewpoint must match pretraining distribution** - GR00T expects third-person/opposite-side views for arm manipulation
-5. **Frozen VL model cannot adapt** to fundamentally different camera viewpoints
-6. **More training doesn't help** if visual features are wrong from the start
+4. **5K training steps insufficient** for complex manipulation tasks
 
 ### Files Created
 
