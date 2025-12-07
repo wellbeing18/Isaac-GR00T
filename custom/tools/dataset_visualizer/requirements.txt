@@ -1,0 +1,6 @@
+gradio>=4.44.0
+plotly>=5.24.0
+pyarrow>=19.0.0
+av>=12.0.0
+numpy>=1.24.0
+pandas>=2.0.0
