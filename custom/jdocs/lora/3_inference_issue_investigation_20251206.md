@@ -1356,7 +1356,7 @@ The remaining issues are **model quality**, not infrastructure. The closed-loop 
 cd /home/jrobot/project/Isaac-GR00T
 
 # Resume from the 5K checkpoint to reach 10K (per train_groot_mvp.sh header)
-python scripts/gr00t_finetune.py \
+python -W ignore scripts/gr00t_finetune.py \
     --dataset-path /home/jrobot/project/XLeRobot/datasets_groot \
     --output-dir /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251204_215410259 \
     --max-steps 10000 \
@@ -1368,6 +1368,7 @@ python scripts/gr00t_finetune.py \
     --lora-rank 16 \
     --no-tune_diffusion_model \
     --dataloader_num_workers 16 \
+    --report-to tensorboard \
     --resume
 ```
 
@@ -1422,6 +1423,7 @@ python scripts/gr00t_finetune.py \
     --lora-rank 16 \
     --no-tune_diffusion_model \
     --dataloader_num_workers 16 \
+    --report-to tensorboard \
     --resume
 ```
 
