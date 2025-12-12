@@ -146,3 +146,14 @@ Results: 5K vs 10K Comparison
   - lift arm first to have best view then go down to approach
   2) change central camera view to third person view
   3) synchronization of data frames: need visualization tool to verify
+
+
+python /home/jrobot/project/Isaac-GR00T/custom/scripts/convert_lerobot_v3_to_groot.py \
+      --dataset-path "/home/jrobot/project/XLeRobot/datasets copy/left/pick_and_place" \
+      --robot-type so101 \
+      --dual-camera
+
+python custom/scripts/combine_groot_datasets.py \
+    --datasets \
+        "/home/jrobot/project/XLeRobot/datasets copy/left/pick_and_place" \
+    --output "/home/jrobot/project/XLeRobot/datasets_groot"

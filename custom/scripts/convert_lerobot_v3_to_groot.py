@@ -181,13 +181,26 @@ def generate_episodes_jsonl(dataset_path: Path) -> None:
     info_path = dataset_path / "meta" / "info.json"
     episodes_jsonl_path = dataset_path / "meta" / "episodes.jsonl"
     episodes_parquet_dir = dataset_path / "meta" / "episodes" / "chunk-000"
+    tasks_parquet_path = dataset_path / "meta" / "tasks.parquet"
 
     if not info_path.exists():
         raise FileNotFoundError(f"Required file not found: {info_path}")
 
+    # Build task description -> task_index mapping from tasks.parquet
+    task_to_index = {}
+    if tasks_parquet_path.exists():
+        try:
+            import pandas as pd
+            tasks_df = pd.read_parquet(tasks_parquet_path)
+            for task_desc, row in tasks_df.iterrows():
+                task_to_index[str(task_desc)] = int(row['task_index'])
+            print(f"  📋 Loaded {len(task_to_index)} task mappings from tasks.parquet")
+        except Exception as e:
+            print(f"  ⚠️  Warning: Failed to read tasks.parquet: {e}")
+
     # Try to read from meta/episodes/chunk-000/file-*.parquet first (LeRobot v3)
     episode_files = sorted(list(episodes_parquet_dir.glob("file-*.parquet")))
-    
+
     if episode_files:
         try:
             import pandas as pd
@@ -195,33 +208,49 @@ def generate_episodes_jsonl(dataset_path: Path) -> None:
             for f in episode_files:
                 df_list.append(pd.read_parquet(f))
             df = pd.concat(df_list)
-            
+
+            task_index_stats = {}  # Track task_index distribution
+
             with open(episodes_jsonl_path, 'w') as f:
                 for _, row in df.iterrows():
                     episode_data = {
                         "episode_index": int(row['episode_index']),
                         "length": int(row['length'])
                     }
-                    # Add task_index if present
-                    if 'task_index' in row:
-                        episode_data['task_index'] = int(row['task_index'])
-                    else:
-                         # Try to infer or default
-                         episode_data['task_index'] = 0
 
-                    # Add tasks if present (legacy field)
-                    if 'tasks' in row and row['tasks'] is not None:
-                        # tasks might be an array or string in parquet
+                    # Determine task_index
+                    task_index = 0  # default
+
+                    # Method 1: Direct task_index column (if present)
+                    if 'task_index' in row and row['task_index'] is not None:
+                        task_index = int(row['task_index'])
+                    # Method 2: Look up from tasks field using tasks.parquet mapping
+                    elif 'tasks' in row and row['tasks'] is not None and task_to_index:
                         tasks_val = row['tasks']
-                        if hasattr(tasks_val, 'tolist'): # numpy array
-                             episode_data['tasks'] = tasks_val.tolist()
+                        # tasks can be numpy array, list, tuple, or string
+                        # Extract first element if it's array-like
+                        if hasattr(tasks_val, '__len__') and len(tasks_val) > 0 and not isinstance(tasks_val, str):
+                            task_desc = str(tasks_val[0])
                         else:
-                             episode_data['tasks'] = tasks_val
+                            task_desc = str(tasks_val)
+                        task_index = task_to_index.get(task_desc, 0)
+
+                    episode_data['task_index'] = task_index
+                    task_index_stats[task_index] = task_index_stats.get(task_index, 0) + 1
+
+                    # Add tasks if present (legacy field for reference)
+                    if 'tasks' in row and row['tasks'] is not None:
+                        tasks_val = row['tasks']
+                        if hasattr(tasks_val, 'tolist'):  # numpy array
+                            episode_data['tasks'] = tasks_val.tolist()
+                        else:
+                            episode_data['tasks'] = tasks_val
 
                     f.write(json.dumps(episode_data) + '\n')
 
             print(f"  ✅ Created: {episodes_jsonl_path.name} (from episodes parquet)")
             print(f"     Episodes: {len(df)}")
+            print(f"     Task distribution: {dict(sorted(task_index_stats.items()))}")
             return
 
         except Exception as e:

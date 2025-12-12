@@ -52,9 +52,9 @@ export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 export TOKENIZERS_PARALLELISM=false
 
 # Training configuration (ADJUST THESE)
-MAX_STEPS=5000       # 5K steps (~1 hour). Use --resume to continue to 10K.
-SAVE_STEPS=500       # Save checkpoint every 500 steps (10 checkpoints total)
-BATCH_SIZE=8         # Batch size (safe for 24GB VRAM)
+MAX_STEPS=8000       # 5K steps (~1 hour). Use --resume to continue to 10K.
+SAVE_STEPS=1000       # Save checkpoint every 500 steps (10 checkpoints total)
+BATCH_SIZE=32         # Batch size (safe for 24GB VRAM)
 LEARNING_RATE=1e-4   # Learning rate (4x higher than default - critical!)
 LORA_RANK=16         # LoRA rank
 NUM_WORKERS=16       # Dataloader workers (per HuggingFace blog recommendation)
