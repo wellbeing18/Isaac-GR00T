@@ -7,7 +7,7 @@ Unlike LeRobot's aggregate_datasets(), this script:
 1. Works directly with GR00T v2 format (not LeRobot v3)
 2. Preserves modality.json format
 3. Properly reindexes episodes and tasks
-4. Concatenates videos with correct naming
+4. Copies per-episode video files with correct renaming (no concatenation)
 
 Usage:
     # Combine all datasets in a directory
@@ -28,7 +28,6 @@ import json
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 import numpy as np
@@ -45,59 +44,6 @@ def check_ffmpeg_available() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
-
-
-def concatenate_video_files(video_files: List[Path], output_path: Path) -> bool:
-    """
-    Concatenate multiple video files into one using ffmpeg.
-
-    Uses stream copy (no re-encoding) for fast, lossless concatenation.
-
-    Args:
-        video_files: List of video file paths to concatenate (in order)
-        output_path: Output path for the concatenated video
-
-    Returns:
-        True if successful, False otherwise
-    """
-    if len(video_files) == 0:
-        return False
-
-    if len(video_files) == 1:
-        # Just copy the single file
-        shutil.copy2(video_files[0], output_path)
-        return True
-
-    # Create temporary concat list file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-        concat_list_path = Path(f.name)
-        for vf in sorted(video_files):
-            # Use absolute paths and escape single quotes
-            escaped_path = str(vf.absolute()).replace("'", "'\\''")
-            f.write(f"file '{escaped_path}'\n")
-
-    try:
-        # Run ffmpeg concat with stream copy (lossless, fast)
-        result = subprocess.run(
-            [
-                'ffmpeg',
-                '-y',  # Overwrite output
-                '-f', 'concat',
-                '-safe', '0',
-                '-i', str(concat_list_path),
-                '-c', 'copy',  # Stream copy, no re-encoding
-                str(output_path)
-            ],
-            capture_output=True,
-            timeout=300  # 5 minute timeout
-        )
-        return result.returncode == 0
-    except subprocess.TimeoutExpired:
-        print(f"    Warning: ffmpeg timeout concatenating videos")
-        return False
-    finally:
-        # Cleanup temp file
-        concat_list_path.unlink(missing_ok=True)
 
 
 def load_json(path: Path) -> Dict:
@@ -385,92 +331,79 @@ def combine_datasets(datasets: List[Dict], output_path: Path, dry_run: bool = Fa
         if not data_dir.exists():
             print(f"  Warning: No data/ in {ds['path'].name}")
             continue
-            
+
         start_ep_idx, chunk_offset = dataset_offsets[ds_idx]
-        
-        # Case 1: Already converted (flat episode_XXX.parquet)
-        # We need to put them into chunk folders to match the new schema
-        flat_parquet_files = sorted(data_dir.glob("episode_*.parquet"))
-        
-        if flat_parquet_files:
-             print(f"  Processing {ds['path'].name}: found {len(flat_parquet_files)} flat parquet files")
-             for pq_file in flat_parquet_files:
+
+        # Search for per-episode parquet files (GR00T converted format)
+        # These are the preferred format: each file contains exactly one episode
+        # with frame_index reset to 0
+        episode_parquet_files = sorted(data_dir.glob("**/episode_*.parquet"))
+
+        # Search for consolidated parquet files (LeRobot raw format)
+        # These contain multiple episodes per file
+        file_parquet_files = sorted([
+            f for f in data_dir.glob("**/file-*.parquet")
+            if not f.name.endswith('.original')  # Skip backup files
+        ])
+
+        # Prefer episode_*.parquet if available (already converted)
+        # Only use file-*.parquet if no episode files exist
+        if episode_parquet_files:
+            print(f"  Processing {ds['path'].name}: found {len(episode_parquet_files)} episode parquet files (converted format)")
+
+            for pq_file in episode_parquet_files:
                 try:
+                    # Extract episode index from filename (e.g., episode_000.parquet -> 0)
                     old_ep_idx = int(pq_file.stem.split('_')[-1])
                     new_ep_idx = start_ep_idx + old_ep_idx
-                    
+
                     # Determine new chunk
                     new_chunk_idx = new_ep_idx // chunk_size
-                    
+
                     # Create chunk directory
                     chunk_dir = output_path / "data" / f"chunk-{new_chunk_idx:03d}"
                     chunk_dir.mkdir(exist_ok=True)
-                    
+
                     target = chunk_dir / f"episode_{new_ep_idx:06d}.parquet"
                     shutil.copy2(pq_file, target)
                     copied_count += 1
                 except ValueError:
-                    pass
+                    print(f"    Warning: Could not parse episode index from {pq_file.name}")
+
+        elif file_parquet_files:
+            # ERROR: Found unconverted file-*.parquet files
+            # These are raw LeRobot format where each file contains MULTIPLE episodes
+            # and frame_index is NOT reset to 0. This WILL break GR00T training.
+            print(f"\n  ❌ ERROR: Dataset '{ds['path'].name}' has not been converted!")
+            print(f"     Found {len(file_parquet_files)} file-*.parquet files (raw LeRobot format)")
+            print(f"     but no episode_*.parquet files (converted GR00T format).")
+            print(f"\n     You MUST run conversion first:")
+            print(f"     python custom/scripts/convert_lerobot_v3_to_groot.py \\")
+            print(f"         --dataset-path \"{ds['path']}\" \\")
+            print(f"         --robot-type so101 \\")
+            print(f"         --dual-camera")
+            print(f"\n     Then re-run this combine script.")
+            sys.exit(1)
         else:
-            # Case 2: Chunked (chunk-XXX/episode_XXX.parquet) - from new converter
-            # Case 3: Raw LeRobot (chunk-XXX/file-YYY.parquet)
-            # We search recursively
-            all_parquets = sorted(data_dir.glob("**/*.parquet"))
-            print(f"  Processing {ds['path'].name}: found {len(all_parquets)} chunked parquet files")
-            
-            for pq_file in all_parquets:
-                # Try to parse chunk/file structure
-                old_ep_idx = -1
-                
-                # Is it inside a chunk folder?
-                parent_name = pq_file.parent.name
-                if parent_name.startswith("chunk-"):
-                    try:
-                        old_chunk_idx = int(parent_name.split("-")[-1])
-                        
-                        if pq_file.name.startswith("episode_"):
-                             # chunk-000/episode_000.parquet (Converted format)
-                             # Note: episode index in filename is usually local or global?
-                             # In the converter script, we kept global index??
-                             # Let's assume the filename contains the global index for that dataset.
-                             old_ep_idx = int(pq_file.stem.split("_")[-1])
-                        elif pq_file.name.startswith("file-"):
-                             # chunk-000/file-000.parquet (LeRobot format)
-                             file_idx = int(pq_file.stem.split("-")[-1])
-                             old_ep_idx = old_chunk_idx * chunk_size + file_idx
-                    except ValueError:
-                        pass
-                
-                if old_ep_idx >= 0:
-                    new_ep_idx = start_ep_idx + old_ep_idx
-                    new_chunk_idx = new_ep_idx // chunk_size
-                    
-                    chunk_dir = output_path / "data" / f"chunk-{new_chunk_idx:03d}"
-                    chunk_dir.mkdir(exist_ok=True)
-                    
-                    # We always output as episode_XXXX.parquet
-                    target = chunk_dir / f"episode_{new_ep_idx:06d}.parquet"
-                    shutil.copy2(pq_file, target)
-                    copied_count += 1
+            print(f"\n  ❌ ERROR: No parquet files found in {ds['path'].name}/data/")
+            print(f"     Expected either:")
+            print(f"       - episode_*.parquet files (converted format)")
+            print(f"       - file-*.parquet files (raw LeRobot format)")
+            sys.exit(1)
 
     print(f"  Copied {copied_count} parquet files")
 
-    # Step 6: Copy and rename video files
-    print("\n[6/6] Copying video files...")
+    # Step 6: Copy and rename per-episode video files
+    # GR00T expects one video file per episode: episode_{episode_index:06d}.mp4
+    print("\n[6/6] Copying per-episode video files...")
     copied_videos = 0
-    concatenated_videos = 0
-
-    # Check if ffmpeg is available (needed for concatenation)
-    ffmpeg_available = check_ffmpeg_available()
-    if not ffmpeg_available:
-        print("  Warning: ffmpeg not found. Videos with multiple files per chunk cannot be concatenated.")
-        print("           Install ffmpeg: sudo apt install ffmpeg")
+    missing_videos = 0
 
     # Get video mapping from first dataset's modality.json
-    video_keys = {} # groot_key -> original_key
+    video_keys = {}  # groot_key -> original_key
     if "video" in datasets[0]["modality"]:
-         for k, v in datasets[0]["modality"]["video"].items():
-             video_keys[k] = v.get("original_key", k)
+        for k, v in datasets[0]["modality"]["video"].items():
+            video_keys[k] = v.get("original_key", k)
 
     print(f"  Video keys to process: {video_keys}")
 
@@ -487,59 +420,57 @@ def combine_datasets(datasets: List[Dict], output_path: Path, dry_run: bool = Fa
             camera_dir = videos_root / original_key
 
             if not camera_dir.exists():
-                 print(f"    Warning: Video dir not found: {camera_dir}")
-                 continue
+                print(f"    Warning: Video dir not found: {camera_dir}")
+                continue
 
-            # Group video files by their source chunk
-            # Structure: chunk-XXX/file-YYY.mp4
-            chunk_files: Dict[int, List[Path]] = {}  # old_chunk_idx -> list of video files
+            # Look for per-episode video files (GR00T format)
+            # Structure: chunk-XXX/episode_YYYYYY.mp4
+            episode_videos = sorted(camera_dir.glob("**/episode_*.mp4"))
 
-            for v_file in sorted(camera_dir.glob("**/*.mp4")):
-                if v_file.parent.name.startswith("chunk-"):
+            if episode_videos:
+                # Per-episode format (correct GR00T format)
+                print(f"    {ds['path'].name}/{original_key}: {len(episode_videos)} episode videos")
+
+                for v_file in episode_videos:
                     try:
-                        old_chunk_idx = int(v_file.parent.name.split("-")[-1])
-                        if old_chunk_idx not in chunk_files:
-                            chunk_files[old_chunk_idx] = []
-                        chunk_files[old_chunk_idx].append(v_file)
-                    except ValueError:
-                        pass
-                elif "episode_" in v_file.name:
-                    print(f"    Warning: Found per-episode video {v_file.name}. Skipping.")
+                        # Extract episode index from filename
+                        old_ep_idx = int(v_file.stem.split('_')[-1])
+                        new_ep_idx = start_ep_idx + old_ep_idx
 
-            # Process each chunk
-            for old_chunk_idx, files in sorted(chunk_files.items()):
-                new_chunk_idx = chunk_offset + old_chunk_idx
-                target_dir = output_path / "videos" / original_key / f"chunk-{new_chunk_idx:03d}"
-                target_dir.mkdir(parents=True, exist_ok=True)
-                target_file = target_dir / "file-000.mp4"
+                        # Determine new chunk
+                        new_chunk_idx = new_ep_idx // chunk_size
 
-                if len(files) == 1:
-                    # Single file - just copy
-                    shutil.copy2(files[0], target_file)
-                    copied_videos += 1
-                elif len(files) > 1:
-                    # Multiple files - need to concatenate
-                    if ffmpeg_available:
-                        sorted_files = sorted(files)  # Ensure correct order (file-000, file-001, ...)
-                        print(f"    Concatenating {len(sorted_files)} videos for {original_key}/chunk-{new_chunk_idx:03d}...")
-                        if concatenate_video_files(sorted_files, target_file):
-                            concatenated_videos += 1
-                        else:
-                            print(f"    ERROR: Failed to concatenate videos for chunk-{new_chunk_idx:03d}")
-                            # Fallback: copy first file only
-                            shutil.copy2(sorted_files[0], target_file)
-                            print(f"    Fallback: Copied only {sorted_files[0].name}")
-                            copied_videos += 1
-                    else:
-                        # No ffmpeg - copy first file and warn
-                        print(f"    Warning: Multiple video files in chunk-{old_chunk_idx:03d} but ffmpeg unavailable")
-                        print(f"             Only copying {files[0].name}, other files will be lost!")
-                        shutil.copy2(sorted(files)[0], target_file)
+                        # Create target directory and path
+                        target_dir = output_path / "videos" / original_key / f"chunk-{new_chunk_idx:03d}"
+                        target_dir.mkdir(parents=True, exist_ok=True)
+                        target_file = target_dir / f"episode_{new_ep_idx:06d}.mp4"
+
+                        shutil.copy2(v_file, target_file)
                         copied_videos += 1
+                    except ValueError:
+                        print(f"      Warning: Could not parse episode index from {v_file.name}")
 
-    print(f"  Copied {copied_videos} video files")
-    if concatenated_videos > 0:
-        print(f"  Concatenated {concatenated_videos} multi-file chunks")
+            else:
+                # Check for old file-based format
+                file_videos = sorted(camera_dir.glob("**/file-*.mp4"))
+                if file_videos:
+                    print(f"\n  ❌ ERROR: Dataset '{ds['path'].name}' has file-based videos!")
+                    print(f"     Found {len(file_videos)} file-*.mp4 files (consolidated format)")
+                    print(f"     but no episode_*.mp4 files (per-episode format).")
+                    print(f"\n     You MUST run conversion first to split videos:")
+                    print(f"     python custom/scripts/convert_lerobot_v3_to_groot.py \\")
+                    print(f"         --dataset-path \"{ds['path']}\" \\")
+                    print(f"         --robot-type so101 \\")
+                    print(f"         --dual-camera")
+                    print(f"\n     Then re-run this combine script.")
+                    sys.exit(1)
+                else:
+                    print(f"    Warning: No video files found for {ds['path'].name}/{original_key}")
+                    missing_videos += 1
+
+    print(f"  Copied {copied_videos} per-episode video files")
+    if missing_videos > 0:
+        print(f"  ⚠️  Missing videos for {missing_videos} camera(s)")
 
     # Step 7: Create info.json
     print("\n[7/7] Creating info.json...")
@@ -550,9 +481,10 @@ def combine_datasets(datasets: List[Dict], output_path: Path, dry_run: bool = Fa
         "total_frames": total_frames,
         "total_tasks": len(combined_tasks),
         "fps": datasets[0]["fps"],
-        "chunks_size": chunk_size, 
+        "chunks_size": chunk_size,
         "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-        "video_path": "videos/{video_key}/chunk-{episode_chunk:03d}/file-000.mp4", # Fixed: Use literal file-000.mp4
+        # GR00T per-episode video format (matches official demo_data structure)
+        "video_path": "videos/{video_key}/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.mp4",
         "source_datasets": [str(ds["path"]) for ds in datasets],
     }
     
