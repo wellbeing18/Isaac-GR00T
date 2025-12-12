@@ -513,6 +513,37 @@ bash custom/scripts/train_groot_mvp.sh  # 5000 steps, ~1 hour
 | LoRA Rank | 16 | Standard for VLMs |
 | Save Steps | 500 | 10 checkpoints total |
 | VRAM | ~18-20GB | With --no-tune_diffusion_model |
+| Video Backend | torchvision_av | Default; try `decord` for faster training |
+
+#### Training Speed Optimization
+
+If training is slow (>1.5s/step), try these optimizations:
+
+**Option 1: Use `decord` video backend (easy, 5-15% faster)**
+
+Edit `train_groot_mvp.sh` and change:
+```bash
+--video-backend decord  # instead of torchvision_av
+```
+
+`decord` is optimized for ML training workloads and has less Python overhead.
+
+**Option 2: Re-encode videos to H.264 (one-time, 15-25% faster)**
+
+AV1 codec is storage-efficient but CPU-intensive to decode. H.264 has hardware decode support:
+```bash
+bash custom/scripts/reencode_videos_h264.sh /path/to/dataset
+bash custom/scripts/reencode_videos_h264.sh /path/to/dataset --dry-run  # Preview first
+```
+
+This is a one-time cost (~10-15 min) that benefits all future training runs.
+
+**Typical training speeds by hardware:**
+| GPU | Power | Expected Speed |
+|-----|-------|----------------|
+| RTX 4090 Desktop | 450W | ~0.8-1.0s/step |
+| RTX 5090 Laptop | 95-175W | ~1.2-1.7s/step |
+| RTX 3090 | 350W | ~1.5-2.0s/step |
 
 **What the MVP script does:**
 1. **Step 1-2:** Environment check and pre-training verification
@@ -707,6 +738,7 @@ All scripts are in `/home/jrobot/project/Isaac-GR00T/custom/scripts/`
 | `convert_multitask_to_groot.sh` | Convert all 6 task datasets in batch | `bash convert_multitask_to_groot.sh` or `bash convert_multitask_to_groot.sh --validate-only` |
 | `combine_groot_datasets.py` | Combine multiple converted datasets (requires per-episode videos) | `python combine_groot_datasets.py --input-dir /path --output /path/combined` |
 | `verify_groot_dataset.py` | Verify dataset integrity and video/data sync | `python verify_groot_dataset.py --dataset /path --verbose` |
+| `reencode_videos_h264.sh` | Re-encode videos from AV1 to H.264 for faster training | `bash reencode_videos_h264.sh /path/to/dataset` |
 
 ### Training & Verification Scripts
 
