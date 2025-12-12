@@ -157,3 +157,10 @@ python custom/scripts/combine_groot_datasets.py \
     --datasets \
         "/home/jrobot/project/XLeRobot/datasets copy/left/pick_and_place" \
     --output "/home/jrobot/project/XLeRobot/datasets_groot"
+
+we want to do groot lora finetuning with the latest collected lerobot v3 dataset(/home/jrobot/project/XLeRobot/datasets/left/pick_and_place). but after review and investigation, we found existing conversion/combination has potential issues as stated in(/home/jrobot/project/Isaac-GR00T/custom/jdocs/lora/4_convert_combine_issues_investigation.md). I need your help to do further investigation and research to see whether there are other issues, and what are the correct way to do this so that we have correct combined data for groot finetuning. write your investigation report to /home/jrobot/project/Isaac-GR00T/custom/jdocs/lora/gemini_comments/17_gemini_convert_combine_issuse_investigation.md
+
+
+we want to do groot lora finetuning with the latest collected lerobot v3 dataset(/home/jrobot/project/XLeRobot/datasets/left/pick_and_place). but after review and investigation, we found existing conversion/combination has potential issues as stated in(/home/jrobot/project/Isaac-GR00T/custom/jdocs/lora/4_convert_combine_issues_investigation.md). I need your help to do further investigation and research to see whether there are other issues, and what are the correct way to do this so that we have correct combined data for groot finetuning. write your investigation report to /home/jrobot/project/Isaac-GR00T/custom/jdocs/lora/gemini_comments/18_gpt52_convert_combine_issuse_investigation.md
+
+
