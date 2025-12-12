@@ -2,7 +2,7 @@
 
 ## Complete Guide with Monitoring, Evaluation, and Diagnosis
 
-**Last Updated:** 2025-12-04 (v2.2 - Updated multi-task workflow with key concepts walkthrough)
+**Last Updated:** 2025-12-12 (v2.3 - Updated for One-Video-Per-Episode format)
 **Robot:** SO-ARM101 Left Arm (6 DOF)
 **GPU:** RTX 5090 (24GB VRAM)
 **Model:** GR00T N1.5 (3B parameters)
@@ -189,39 +189,47 @@ Before diving into commands, here's what happens under the hood:
 
 **1. Why Conversion is Needed**
 
-LeRobot v3 and GR00T expect different metadata formats:
+LeRobot v3 and GR00T expect different formats:
 
-| File | LeRobot v3 | GR00T |
-|------|------------|-------|
-| Episodes | `meta/episodes/chunk-000/file-000.parquet` | `meta/episodes.jsonl` |
-| Tasks | `meta/tasks.parquet` | `meta/tasks.jsonl` |
-| Modality | Not present | `meta/modality.json` (required!) |
-| Data | `data/chunk-000/file-000.parquet` (consolidated) | `data/chunk-000/episode_000.parquet` (per-episode) |
+| Aspect | LeRobot v3 | GR00T |
+|--------|------------|-------|
+| Episodes metadata | `meta/episodes/chunk-*/file-*.parquet` | `meta/episodes.jsonl` |
+| Tasks metadata | `meta/tasks.parquet` | `meta/tasks.jsonl` |
+| Modality config | Not present | `meta/modality.json` (required!) |
+| Data files | `data/chunk-*/file-*.parquet` (consolidated) | `data/chunk-*/episode_XXXXXX.parquet` (per-episode) |
+| Video files | `videos/.../chunk-*/file-*.mp4` (concatenated) | `videos/.../chunk-*/episode_XXXXXX.mp4` (per-episode) |
+| Timestamps | Global (cumulative across episodes) | Local (each episode starts at 0) |
 
-**2. The Chunk System (Critical for Videos)**
+**2. The One-Video-Per-Episode Format (Critical!)**
 
-LeRobot stores video frames in **chunks** - one video file contains frames for MANY episodes:
+GR00T expects **one video file per episode**, with timestamps starting at 0:
 
 ```
 videos/observation.images.head/
 └── chunk-000/
-    └── file-000.mp4   # Contains frames for episodes 0-999 (based on chunk_size)
+    ├── episode_000000.mp4   # Episode 0 video (timestamps 0 to ~23s)
+    ├── episode_000001.mp4   # Episode 1 video (timestamps 0 to ~25s)
+    └── ...
 ```
 
-Episodes use **timestamps** (stored in parquet) to extract their frames from the shared video.
-This is why we can't simply rename videos per-episode - they must stay as chunks.
+The conversion script uses `ffmpeg` to split the concatenated LeRobot videos into per-episode files based on `from_timestamp` / `to_timestamp` metadata.
 
-**3. Combining Datasets = Shifting Chunks**
+**Why per-episode videos?**
+- GR00T's `get_frames_by_timestamps()` expects video timestamps to match parquet timestamps
+- With concatenated videos, episode 10 might start at timestamp 300s in the video but 0s in parquet
+- Per-episode videos ensure both start at 0, preventing frame sync issues
 
-When combining datasets, we shift chunk indices to avoid collisions:
+**3. Combining Datasets**
+
+When combining datasets, episode and chunk indices are shifted to avoid collisions:
 
 ```
-Dataset A (pick):    chunk-000, chunk-001  →  Combined: chunk-000, chunk-001
-Dataset B (place):   chunk-000             →  Combined: chunk-002
-Dataset C (push):    chunk-000             →  Combined: chunk-003
+Dataset A (pick):    episodes 0-9    →  Combined: episodes 0-9 (chunk-000)
+Dataset B (place):   episodes 0-9    →  Combined: episodes 1000-1009 (chunk-001)
+Dataset C (push):    episodes 0-9    →  Combined: episodes 2000-2009 (chunk-002)
 ```
 
-Episode indices are also shifted to match: `new_episode = chunk_offset * chunk_size + old_episode`
+Video files are copied with new episode indices: `episode_000000.mp4` → `episode_001000.mp4`
 
 ---
 
@@ -255,22 +263,36 @@ for task in grasp pick place push reach release; do
 done
 ```
 
-**What the conversion does for each dataset:**
+**What the conversion does for each dataset (7 steps):**
 
 ```
 BEFORE (LeRobot v3):                    AFTER (GR00T-compatible):
 meta/                                   meta/
-├── info.json                           ├── info.json
+├── info.json                           ├── info.json (updated paths)
 ├── stats.json                          ├── stats.json (fixed counts)
 ├── tasks.parquet          ──────►      ├── tasks.jsonl
-├── episodes/chunk-000/file-000.parquet ├── episodes.jsonl (with task_index)
+├── episodes/chunk-*/file-*.parquet     ├── episodes.jsonl (with task_index)
 └── config.yaml                         └── modality.json (NEW!)
 
 data/chunk-000/                         data/chunk-000/
-└── file-000.parquet       ──────►      ├── episode_000.parquet
-    (all episodes)                      ├── episode_001.parquet
-                                        └── ... (per-episode)
+└── file-000.parquet       ──────►      ├── episode_000000.parquet
+    (all episodes)                      ├── episode_000001.parquet
+                                        └── ... (per-episode, frame_index reset to 0)
+
+videos/.../chunk-000/                   videos/.../chunk-000/
+└── file-000.mp4           ──────►      ├── episode_000000.mp4
+    (concatenated)                      ├── episode_000001.mp4
+                                        └── ... (per-episode, timestamps start at 0)
 ```
+
+**Conversion steps:**
+1. [1/7] Create `modality.json` with GR00T format mapping
+2. [2/7] Fix `stats.json` count fields (per-dimension arrays)
+3. [3/7] Generate `episodes.jsonl` from episode metadata
+4. [4/7] Generate `tasks.jsonl` with task descriptions
+5. [5/7] Split parquet files into per-episode format (reset frame_index to 0)
+6. [6/7] Split videos into per-episode files using ffmpeg
+7. [7/7] Update `info.json` with GR00T-compatible path patterns
 
 **Configuration** (edit `convert_multitask_to_groot.sh` to customize):
 ```bash
@@ -301,20 +323,20 @@ python custom/scripts/combine_groot_datasets.py \
 **What the combine script does:**
 
 ```
-INPUT (3 separate datasets):
+INPUT (3 separate converted datasets):
 
-pick/   (10 episodes, chunk-000)
-place/  (10 episodes, chunk-000)
-push/   (10 episodes, chunk-000)
+pick/   (10 episodes: episode_000000 to episode_000009)
+place/  (10 episodes: episode_000000 to episode_000009)
+push/   (10 episodes: episode_000000 to episode_000009)
 
-                    ↓ Combine with chunk shifting ↓
+                    ↓ Combine with index shifting ↓
 
 OUTPUT (1 combined dataset):
 
 datasets_groot/
 ├── meta/
 │   ├── tasks.jsonl      # 3 tasks: [0] pick, [1] place, [2] push
-│   ├── episodes.jsonl   # 30 episodes with remapped task_index
+│   ├── episodes.jsonl   # 30 episodes with remapped task_index & episode_index
 │   └── ...
 ├── data/
 │   ├── chunk-000/       # pick episodes (0-9)
@@ -326,17 +348,43 @@ datasets_groot/
 │   └── chunk-002/       # push episodes (2000-2009)
 │       └── ...
 └── videos/
-    └── observation.images.head/
-        ├── chunk-000/file-000.mp4  # pick video
-        ├── chunk-001/file-000.mp4  # place video
-        └── chunk-002/file-000.mp4  # push video
+    ├── observation.images.head/
+    │   ├── chunk-000/
+    │   │   ├── episode_000000.mp4  # pick episode videos
+    │   │   └── ...
+    │   ├── chunk-001/
+    │   │   ├── episode_001000.mp4  # place episode videos
+    │   │   └── ...
+    │   └── chunk-002/
+    │       └── ...                 # push episode videos
+    └── observation.images.left_wrist/
+        └── ...                     # same structure
 ```
 
-**Step 4: Verify the combined dataset**
+**Important:** The combine script requires datasets to be **already converted** (with `episode_*.mp4` files). It will error if it finds unconverted `file-*.mp4` files.
+
+**Step 4: Verify the combined dataset (CRITICAL)**
 
 ```bash
-python custom/scripts/verify_groot_training_setup.py \
-    --dataset /home/jrobot/project/XLeRobot/datasets_groot
+# Comprehensive verification (checks meta, data, video synchronization)
+python custom/scripts/verify_groot_dataset.py \
+    --dataset /home/jrobot/project/XLeRobot/datasets_groot \
+    --verbose
+
+# Expected output: ✅ ALL CHECKS PASSED
+# If any check fails, fix issues before training!
+```
+
+Key verification checks:
+- **Parquet Files**: Each file should contain exactly 1 episode with frame_index starting at 0
+- **Data-Video Sync**: Total frames must match across info.json, episodes.jsonl, and parquet files
+- **Task Distribution**: Episodes should have correct task_index values (not all 0!)
+
+You can also verify the source dataset before combination:
+```bash
+python custom/scripts/verify_groot_dataset.py \
+    --dataset "/home/jrobot/project/XLeRobot/datasets copy/left/pick_and_place" \
+    --source --verbose
 ```
 
 ---
@@ -347,25 +395,33 @@ python custom/scripts/verify_groot_training_setup.py \
 datasets_groot/
 ├── meta/
 │   ├── info.json           # Combined: total_episodes, total_frames, total_tasks
+│   │                       # video_path: videos/{video_key}/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.mp4
+│   │                       # data_path: data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet
 │   ├── modality.json       # GR00T format mapping
 │   ├── stats.json          # Combined normalization statistics
 │   ├── episodes.jsonl      # All episodes with task_index
 │   └── tasks.jsonl         # All task descriptions
 ├── data/
-│   ├── chunk-000/          # First dataset's episodes
-│   │   ├── episode_000000.parquet
+│   ├── chunk-000/          # First dataset's episodes (0-999)
+│   │   ├── episode_000000.parquet   # Each file: single episode, frame_index starts at 0
+│   │   ├── episode_000001.parquet
 │   │   └── ...
-│   ├── chunk-001/          # Second dataset's episodes
+│   ├── chunk-001/          # Second dataset's episodes (1000-1999)
+│   │   ├── episode_001000.parquet
 │   │   └── ...
 │   └── ...
 └── videos/
     ├── observation.images.head/
-    │   ├── chunk-000/file-000.mp4
-    │   ├── chunk-001/file-000.mp4
+    │   ├── chunk-000/
+    │   │   ├── episode_000000.mp4   # Per-episode video, timestamps start at 0
+    │   │   ├── episode_000001.mp4
+    │   │   └── ...
+    │   ├── chunk-001/
+    │   │   ├── episode_001000.mp4
+    │   │   └── ...
     │   └── ...
     └── observation.images.left_wrist/
-        ├── chunk-000/file-000.mp4
-        └── ...
+        └── ...                       # Same structure
 ```
 
 **Example 6-Task Dataset Summary:**
@@ -647,9 +703,10 @@ All scripts are in `/home/jrobot/project/Isaac-GR00T/custom/scripts/`
 
 | Script | Purpose | Usage |
 |--------|---------|-------|
-| `convert_lerobot_v3_to_groot.py` | Convert single LeRobot v3 dataset to GR00T format | `python convert_lerobot_v3_to_groot.py --dataset-path /path --robot-type so101 --dual-camera` |
+| `convert_lerobot_v3_to_groot.py` | Convert single LeRobot v3 dataset to GR00T format (includes video splitting) | `python convert_lerobot_v3_to_groot.py --dataset-path /path --robot-type so101 --dual-camera` |
 | `convert_multitask_to_groot.sh` | Convert all 6 task datasets in batch | `bash convert_multitask_to_groot.sh` or `bash convert_multitask_to_groot.sh --validate-only` |
-| `combine_groot_datasets.py` | Combine multiple datasets | `python combine_groot_datasets.py --input-dir /path --output /path/combined` |
+| `combine_groot_datasets.py` | Combine multiple converted datasets (requires per-episode videos) | `python combine_groot_datasets.py --input-dir /path --output /path/combined` |
+| `verify_groot_dataset.py` | Verify dataset integrity and video/data sync | `python verify_groot_dataset.py --dataset /path --verbose` |
 
 ### Training & Verification Scripts
 
