@@ -221,7 +221,18 @@ def create_app(default_dataset: str = DEFAULT_DATASET) -> gr.Blocks:
                 value=default_dataset,
                 scale=4,
             )
+            browse_btn = gr.Button("Browse", scale=1)
             load_btn = gr.Button("Load Dataset", variant="primary", scale=1)
+
+        # File explorer (hidden by default, shown when Browse is clicked)
+        with gr.Row(visible=False) as explorer_row:
+            file_explorer = gr.FileExplorer(
+                glob="**/",
+                file_count="single",
+                root_dir="/home/jrobot/project/XLeRobot",
+                label="Select Dataset Directory",
+                height=300,
+            )
 
         with gr.Row():
             episode_dropdown = gr.Dropdown(
@@ -316,6 +327,39 @@ def create_app(default_dataset: str = DEFAULT_DATASET) -> gr.Blocks:
                 )
 
         # Event handlers
+
+        # Browse button toggles file explorer visibility
+        def toggle_explorer(visible):
+            return gr.Row(visible=not visible)
+
+        explorer_visible = gr.State(False)
+
+        def toggle_and_track(is_visible):
+            return not is_visible, gr.Row(visible=not is_visible)
+
+        browse_btn.click(
+            fn=toggle_and_track,
+            inputs=[explorer_visible],
+            outputs=[explorer_visible, explorer_row],
+        )
+
+        # When a directory is selected in file explorer, update the path and hide explorer
+        def on_file_select(selected_path, is_visible):
+            if selected_path is None:
+                return gr.update(), is_visible, gr.Row(visible=is_visible)
+            # Get the full path
+            full_path = Path("/home/jrobot/project/XLeRobot") / selected_path
+            # If it's a file, get parent directory
+            if full_path.is_file():
+                full_path = full_path.parent
+            return str(full_path), False, gr.Row(visible=False)
+
+        file_explorer.change(
+            fn=on_file_select,
+            inputs=[file_explorer, explorer_visible],
+            outputs=[dataset_path, explorer_visible, explorer_row],
+        )
+
         load_btn.click(
             fn=load_dataset,
             inputs=[dataset_path],
