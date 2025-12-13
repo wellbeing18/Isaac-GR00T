@@ -527,10 +527,10 @@ Laptop GPUs are often power-limited. Check with `nvidia-smi`:
 
 **2. Video Backend**
 
-The script now defaults to `decord` which is optimized for ML training. You can change in `train_groot_mvp.sh`:
+The script defaults to `torchvision_av` (tested, safe). Alternative backends may be faster but need validation:
 ```bash
-VIDEO_BACKEND=decord       # Default, faster for training
-VIDEO_BACKEND=torchvision_av  # Alternative
+VIDEO_BACKEND=torchvision_av  # Default, tested
+VIDEO_BACKEND=decord          # Potentially faster, needs validation (see 5_encode_train_performance_investigation.md)
 ```
 
 **Note on video codec:** AV1 is the correct format. Per [LeRobot's benchmark](https://huggingface.co/blog/video-encoding), AV1 decodes faster than H.264 for multi-frame loading. Do NOT re-encode to H.264.

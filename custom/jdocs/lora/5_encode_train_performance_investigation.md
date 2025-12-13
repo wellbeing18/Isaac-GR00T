@@ -182,7 +182,7 @@ The slow training speed (~1.67s/step) is likely due to:
 
 ## Conclusion
 
-**Status:** Research complete - Re-encoding NOT recommended
+**Status:** Research complete - Re-encoding NOT recommended, decord needs validation
 
 ### Key Finding
 
@@ -195,20 +195,117 @@ Based on [LeRobot's official benchmark](https://huggingface.co/blog/video-encodi
 
 The ~1.67s/step speed is due to:
 1. **GPU power limit (95W)** - Primary bottleneck, cannot be changed on this laptop
-2. **Video backend** - Try `--video-backend decord` for potential improvement
+2. **Video backend** - `decord` may provide improvement but needs validation first
 
 ### Recommendation
 
 - [x] **Do NOT add H.264 re-encoding to pipeline** - No benefit, adds complexity
 - [x] **Keep AV1** - It's the LeRobot recommended format
-- [ ] **Try `decord` backend** - May provide 5-15% improvement
+- [x] **Keep `torchvision_av` as default** - Known to work, safe
+- [ ] **Validate `decord` backend** - Test before switching (see experiments below)
 - [ ] **Accept current speed** - 95W power limit is the real constraint
+
+---
+
+## Pending: Video Backend Validation (decord vs torchvision_av)
+
+### Background
+
+The video backend determines how video frames are loaded during training:
+
+```
+Training Loop → Dataset.__getitem__() → get_frames_by_timestamps() → video backend
+```
+
+**Available backends in GR00T (`gr00t/utils/video.py`):**
+
+| Backend | Implementation | Status |
+|---------|----------------|--------|
+| `torchvision_av` | PyAV via torchvision, iterates frames | ✅ Current default, tested |
+| `decord` | Batch loading with `get_batch()` | ⚠️ Potentially faster, needs validation |
+| `torchcodec` | New torchcodec library | ❓ Not tested |
+| `opencv` | cv2.VideoCapture, frame-by-frame | ❌ Slowest |
+
+### Concerns with Switching to decord
+
+1. **Different frame retrieval logic**
+   - `torchvision_av`: Seeks to keyframe, iterates to target, finds closest
+   - `decord`: Maps timestamps to indices, uses `get_batch()`
+
+2. **Timestamp mapping differences**
+   - Could retrieve slightly different frames for same timestamp
+
+3. **Color space**
+   - Both should return RGB, but worth verifying
+
+### Experiment Plan: Validate decord Backend
+
+**Experiment 1: Frame Consistency Check**
+
+Compare frames retrieved by both backends for same timestamps:
+
+```python
+# Test script to run after training completes
+import numpy as np
+from gr00t.utils.video import get_frames_by_timestamps
+
+video_path = "/path/to/episode_000000.mp4"
+timestamps = [0.0, 1.0, 2.0, 5.0, 10.0]
+
+frames_tv = get_frames_by_timestamps(video_path, timestamps, video_backend="torchvision_av")
+frames_dec = get_frames_by_timestamps(video_path, timestamps, video_backend="decord")
+
+# Compare
+for i, ts in enumerate(timestamps):
+    diff = np.abs(frames_tv[i].astype(float) - frames_dec[i].astype(float)).mean()
+    print(f"ts={ts}: mean pixel diff = {diff:.2f}")
+
+# Acceptable: diff < 5 (minor interpolation differences)
+# Problematic: diff > 20 (different frames)
+```
+
+**Experiment 2: Performance Benchmark**
+
+Run short training with both backends:
+
+```bash
+# Baseline (current)
+python scripts/gr00t_finetune.py --video-backend torchvision_av --max-steps 100 ...
+
+# Test
+python scripts/gr00t_finetune.py --video-backend decord --max-steps 100 ...
+```
+
+Compare: steps/second
+
+**Experiment 3: Training Quality Check**
+
+If Experiments 1-2 pass, run longer training and compare:
+- Loss curves
+- Evaluation MAE
+- Inference behavior
+
+### Results
+
+**Experiment 1: Frame Consistency**
+- Status: ⏳ Pending
+- Result: TBD
+
+**Experiment 2: Performance**
+- Status: ⏳ Pending
+- `torchvision_av`: ~1.67s/step (from current training)
+- `decord`: TBD
+
+**Experiment 3: Training Quality**
+- Status: ⏳ Pending
+- Result: TBD
 
 ---
 
 ## Next Steps
 
 1. ~~Run codec benchmark experiments~~ (Not needed - LeRobot already benchmarked)
-2. Try `--video-backend decord` in next training run
-3. If still slow, the GPU power limit is the bottleneck (hardware limitation)
-4. Consider external cooling pad for laptop to potentially unlock higher power limits
+2. Wait for current training to complete (using `torchvision_av`)
+3. Run decord validation experiments (frame consistency + performance)
+4. If validated, switch default to `decord`
+5. GPU power limit (95W) remains the primary constraint

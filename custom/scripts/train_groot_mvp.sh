@@ -58,7 +58,7 @@ BATCH_SIZE=32         # Batch size (safe for 24GB VRAM)
 LEARNING_RATE=1e-4   # Learning rate (4x higher than default - critical!)
 LORA_RANK=16         # LoRA rank
 NUM_WORKERS=16       # Dataloader workers (per HuggingFace blog recommendation)
-VIDEO_BACKEND=decord # Video backend: decord (faster) or torchvision_av (default)
+VIDEO_BACKEND=torchvision_av # Video backend: torchvision_av (default, tested) or decord (potentially faster, needs validation)
 
 echo "========================================================================"
 echo "GR00T MVP LoRA Training - SO-101 Left Arm"
