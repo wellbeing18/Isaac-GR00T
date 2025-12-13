@@ -58,6 +58,7 @@ BATCH_SIZE=32         # Batch size (safe for 24GB VRAM)
 LEARNING_RATE=1e-4   # Learning rate (4x higher than default - critical!)
 LORA_RANK=16         # LoRA rank
 NUM_WORKERS=16       # Dataloader workers (per HuggingFace blog recommendation)
+VIDEO_BACKEND=decord # Video backend: decord (faster) or torchvision_av (default)
 
 echo "========================================================================"
 echo "GR00T MVP LoRA Training - SO-101 Left Arm"
@@ -70,6 +71,7 @@ echo "  - Batch Size: $BATCH_SIZE"
 echo "  - Learning Rate: $LEARNING_RATE"
 echo "  - LoRA Rank: $LORA_RANK"
 echo "  - Dataloader Workers: $NUM_WORKERS"
+echo "  - Video Backend: $VIDEO_BACKEND"
 echo ""
 echo "Duration: ~50-60 minutes"
 echo "Expected VRAM: 18-20GB"
@@ -272,7 +274,7 @@ if command -v unbuffer &> /dev/null; then
         --batch-size $BATCH_SIZE \
         --learning-rate $LEARNING_RATE \
         --data-config so100_dualcam \
-        --video-backend torchvision_av \
+        --video-backend $VIDEO_BACKEND \
         --lora-rank $LORA_RANK \
         --no-tune_diffusion_model \
         --save-steps $SAVE_STEPS \
@@ -290,7 +292,7 @@ else
         --batch-size $BATCH_SIZE \
         --learning-rate $LEARNING_RATE \
         --data-config so100_dualcam \
-        --video-backend torchvision_av \
+        --video-backend $VIDEO_BACKEND \
         --lora-rank $LORA_RANK \
         --no-tune_diffusion_model \
         --save-steps $SAVE_STEPS \

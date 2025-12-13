@@ -96,3 +96,4 @@ For the dataset at `/home/jrobot/project/XLeRobot/datasets/left/pick_and_place`:
 **Immediate Action:**
 I will proceed to modify the scripts to implement the **One-Video-Per-Episode** strategy. This is the only way to ensure reliable training with GR00T.
 
+
