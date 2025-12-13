@@ -54,10 +54,11 @@ export TOKENIZERS_PARALLELISM=false
 # Training configuration (ADJUST THESE)
 MAX_STEPS=8000       # 5K steps (~1 hour). Use --resume to continue to 10K.
 SAVE_STEPS=1000       # Save checkpoint every 500 steps (10 checkpoints total)
-BATCH_SIZE=32         # Batch size (safe for 24GB VRAM)
+BATCH_SIZE=16         # Batch size (reduced from 32 to prevent OOM)
+GRAD_ACCUM=2          # Accumulate steps to maintain effective batch size of 32
 LEARNING_RATE=1e-4   # Learning rate (4x higher than default - critical!)
 LORA_RANK=16         # LoRA rank
-NUM_WORKERS=8        # Dataloader workers (reduced from 16 to prevent OOM on long training runs)
+NUM_WORKERS=4        # Dataloader workers (reduced from 8 to prevent RAM OOM)
 VIDEO_BACKEND=torchvision_av # Video backend: torchvision_av (default, tested) or decord (potentially faster, needs validation)
 
 echo "========================================================================"
@@ -67,7 +68,8 @@ echo ""
 echo "Training Configuration:"
 echo "  - Steps: $MAX_STEPS"
 echo "  - Save every: $SAVE_STEPS steps"
-echo "  - Batch Size: $BATCH_SIZE"
+echo "  - Batch Size: $BATCH_SIZE (Effective: $((BATCH_SIZE * GRAD_ACCUM)))"
+echo "  - Grad Accum: $GRAD_ACCUM"
 echo "  - Learning Rate: $LEARNING_RATE"
 echo "  - LoRA Rank: $LORA_RANK"
 echo "  - Dataloader Workers: $NUM_WORKERS"
@@ -278,7 +280,7 @@ if command -v unbuffer &> /dev/null; then
         --lora-rank $LORA_RANK \
         --no-tune_diffusion_model \
         --save-steps $SAVE_STEPS \
-        --gradient-accumulation-steps 1 \
+        --gradient-accumulation-steps $GRAD_ACCUM \
         --warmup-ratio 0.05 \
         --dataloader_num_workers $NUM_WORKERS \
         --report-to tensorboard \
@@ -296,7 +298,7 @@ else
         --lora-rank $LORA_RANK \
         --no-tune_diffusion_model \
         --save-steps $SAVE_STEPS \
-        --gradient-accumulation-steps 1 \
+        --gradient-accumulation-steps $GRAD_ACCUM \
         --warmup-ratio 0.05 \
         --dataloader_num_workers $NUM_WORKERS \
         --report-to tensorboard \
@@ -323,14 +325,15 @@ else
     exit $TRAINING_EXIT_CODE
 fi
 
-# Run checkpoint evaluation
+# Run checkpoint evaluation (only last checkpoint to save time)
 if [ -f "$CUSTOM_SCRIPTS/evaluate_groot_checkpoint.py" ]; then
     echo ""
-    echo "Evaluating all checkpoints on training data..."
+    echo "Evaluating last checkpoint on training data..."
     python "$CUSTOM_SCRIPTS/evaluate_groot_checkpoint.py" \
         --training-dir "$OUTPUT_DIR" \
         --dataset "$DATASET_PATH" \
         --num-samples 300 \
+        --last 1 \
         --output "$OUTPUT_DIR/evaluation_results.json" \
         2>&1 | tee "$OUTPUT_DIR/evaluation.log"
 

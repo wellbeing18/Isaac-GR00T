@@ -69,13 +69,14 @@ def load_sample_frames(dataset_path: Path, num_samples: int = 5) -> List[Dict]:
         ep_length = ep["length"]
         task_idx = ep.get("task_index", 0)
         task_desc = tasks.get(task_idx, "unknown task")
+        chunk_idx = ep.get("chunk_index", 0)  # Get chunk index from episode metadata
 
         # Get a frame from middle of episode
         frame_idx = ep_length // 2
 
         try:
-            # Load parquet
-            parquet_file = data_dir / f"episode_{ep_idx:06d}.parquet"
+            # Load parquet (LeRobot v3 format: data/chunk-XXX/episode_XXXXXX.parquet)
+            parquet_file = data_dir / f"chunk-{chunk_idx:03d}" / f"episode_{ep_idx:06d}.parquet"
             table = pq.read_table(parquet_file)
             df = table.to_pandas()
             row = df.iloc[frame_idx]

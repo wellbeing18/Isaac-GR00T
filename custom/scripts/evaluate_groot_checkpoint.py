@@ -420,6 +420,12 @@ def main():
         type=str,
         help="Path to save evaluation results JSON"
     )
+    parser.add_argument(
+        "--last", "-l",
+        type=int,
+        default=0,
+        help="Only evaluate the last N checkpoints (default: 0 = all). Use --last 1 for only the latest, --last 2 for last two, etc."
+    )
 
     args = parser.parse_args()
 
@@ -451,7 +457,12 @@ def main():
             print(f"ERROR: No checkpoints found in {training_dir}")
             return 1
 
-        print(f"Found {len(checkpoints)} checkpoint(s)")
+        # Filter to last N checkpoints if specified
+        if args.last > 0 and len(checkpoints) > args.last:
+            print(f"Found {len(checkpoints)} checkpoint(s), evaluating last {args.last}")
+            checkpoints = checkpoints[-args.last:]
+        else:
+            print(f"Found {len(checkpoints)} checkpoint(s)")
 
         for ckpt in checkpoints:
             metrics = evaluate_checkpoint(
