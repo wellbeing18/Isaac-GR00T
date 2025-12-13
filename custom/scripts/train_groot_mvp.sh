@@ -57,7 +57,7 @@ SAVE_STEPS=1000       # Save checkpoint every 500 steps (10 checkpoints total)
 BATCH_SIZE=32         # Batch size (safe for 24GB VRAM)
 LEARNING_RATE=1e-4   # Learning rate (4x higher than default - critical!)
 LORA_RANK=16         # LoRA rank
-NUM_WORKERS=16       # Dataloader workers (per HuggingFace blog recommendation)
+NUM_WORKERS=8        # Dataloader workers (reduced from 16 to prevent OOM on long training runs)
 VIDEO_BACKEND=torchvision_av # Video backend: torchvision_av (default, tested) or decord (potentially faster, needs validation)
 
 echo "========================================================================"
