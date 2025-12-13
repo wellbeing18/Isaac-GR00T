@@ -1,0 +1,19 @@
+{
+  "duration_s": 62.29452681541443,
+  "producer_count": 367,
+  "consumer_count": 1809,
+  "producer_rate_hz": 5.891368291269979,
+  "consumer_rate_hz": 29.039469315823958,
+  "stale_count": 0,
+  "stale_rate": 0.0,
+  "ensemble_count": 1804,
+  "ensemble_rate": 0.9972360420121614,
+  "avg_latency_ms": 36.13418699826504,
+  "max_latency_ms": 228.34539413452148,
+  "config": {
+    "model_path": "/home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058/best",
+    "action_horizon": 16,
+    "action_interval": 0.033,
+    "denoising_steps": 4
+  }
+}

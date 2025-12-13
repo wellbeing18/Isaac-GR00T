@@ -3,7 +3,7 @@
 # This file centralizes all hardware-specific settings for the SO101 robot setup.
 # Update this file when USB connections change.
 #
-# Last updated: 2025-12-06
+# Last updated: 2025-12-13
 # USB topology verified with: lsusb -t && v4l2-ctl --list-devices
 
 # =============================================================================
@@ -15,14 +15,14 @@
 robot_arms:
   left:
     # Left arm (follower) - currently ACTIVE
-    port: "/dev/ttyACM0"
+    port: "/dev/ttyACM1"
     usb_path: "3-4.1.1"  # Bus 3, Port 4 → Hub Port 1 → Sub-port 1
     robot_id: "xlerobot_left_arm"
     use_degrees: true
 
   right:
     # Right arm - currently NOT USED
-    port: "/dev/ttyACM1"
+    port: "/dev/ttyACM3"
     usb_path: "3-4.1.3"  # Bus 3, Port 4 → Hub Port 1 → Sub-port 3
     robot_id: "xlerobot_right_arm"
     use_degrees: true
@@ -38,8 +38,8 @@ cameras:
   head:
     # Central/head camera - mounted overhead or in front
     # DIRECT connection to avoid USB bandwidth issues
-    device_index: 8  # /dev/video8
-    usb_path: "80:14.0-1"  # Bus 003 Port 001 (DIRECT - no hub)
+    device_index: 4  # /dev/video4
+    usb_path: "80:14.0-4.3"  # Bus 003 Port 004 Hub Port 3
     connection: "direct"
     resolution:
       width: 640   # GR00T model requires 640x480 - cannot reduce
@@ -50,8 +50,8 @@ cameras:
   wrist:
     # Left arm wrist camera - mounted on end effector
     # DIRECT connection to avoid USB bandwidth issues
-    device_index: 4  # /dev/video4
-    usb_path: "80:14.0-3"  # Bus 003 Port 003 (DIRECT - no hub)
+    device_index: 6  # /dev/video6
+    usb_path: "80:14.0-4.4"  # Bus 003 Port 004 Hub Port 4
     connection: "direct"
     resolution:
       width: 640   # GR00T model requires 640x480 - cannot reduce
@@ -138,12 +138,11 @@ logging:
 #   v4l2-ctl --list-devices     # Show video devices
 #   ls -la /dev/ttyACM*         # Show serial ports
 #
-# Current topology (2025-12-06):
+# Current topology (2025-12-13):
 # Bus 003 (USB 2.0, 480Mbps):
-#   Port 001: video8 (head camera) - DIRECT
-#   Port 003: video4 (wrist camera) - DIRECT
 #   Port 004 → Hub:
-#     Port 1: ttyACM0 (left arm serial)
-#     Port 3: ttyACM1 (right arm serial)
-#     Port 4: video6 (right arm camera)
-#   Port 006: video0-3 (laptop webcam)
+#     Port 3: video4 (head camera)
+#     Port 4: video6 (wrist camera)
+#   ttyACM0: left arm serial (5AAF288006)
+#   ttyACM1: right arm serial (5A7C118705)
+#   Port 006: video0-3 (laptop webcam - HP True Vision FHD)

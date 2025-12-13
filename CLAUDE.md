@@ -18,6 +18,10 @@ NVIDIA's Isaac GR00T N1.5 - an open foundation model (3B parameters) for general
 ### Git Commits
 - Never include "Claude Code" or AI attribution in commit messages
 
+
+### coding rules
+- always throw error when key logic is not satisfied, never default to some no reasons backed default trivial values or logic, which could become a huge bugs later. 
+
 ### Investigation & Research Methodology
 
 When debugging or investigating issues (especially inference problems), follow these principles:

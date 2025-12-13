@@ -164,3 +164,24 @@ we want to do groot lora finetuning with the latest collected lerobot v3 dataset
 we want to do groot lora finetuning with the latest collected lerobot v3 dataset(/home/jrobot/project/XLeRobot/datasets/left/pick_and_place). but after review and investigation, we found existing conversion/combination has potential issues as stated in(/home/jrobot/project/Isaac-GR00T/custom/jdocs/lora/4_convert_combine_issues_investigation.md). I need your help to do further investigation and research to see whether there are other issues, and what are the correct way to do this so that we have correct combined data for groot finetuning. write your investigation report to /home/jrobot/project/Isaac-GR00T/custom/jdocs/lora/gemini_comments/18_gpt52_convert_combine_issuse_investigation.md
 
 
+python custom/scripts/infer_groot_async.py \
+      --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058/best \
+      --task "pick up the red cube and place it on the white plate"
+
+python scripts/gr00t_finetune.py \
+      --dataset-path /home/jrobot/project/XLeRobot/datasets_groot \
+      --output-dir /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058 \
+      --max-steps 10000 \
+      --save-steps 1000 \
+      --batch-size 16 \
+      --gradient-accumulation-steps 2 \
+      --data-config so100_dualcam \
+      --video-backend torchvision_av \
+      --lora-rank 16 \
+      --no-tune_diffusion_model \
+      --dataloader_num_workers 4 \
+      --resume
+
+1) training batch shuffle
+2) training data sample and visualization
+3) open loop evaluation
