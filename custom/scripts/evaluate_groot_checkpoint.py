@@ -160,11 +160,9 @@ def load_dataset_samples(
 
 def load_model(checkpoint_path: Path, data_config: str = "so100_dualcam"):
     """Load a GR00T model from checkpoint (handles both full and LoRA checkpoints)."""
-    # Import the inference utilities we created
-    sys.path.insert(0, str(checkpoint_path.parent.parent / "custom" / "scripts"))
-
+    # Import the inference utilities
     try:
-        from infer_groot_so101 import is_lora_checkpoint, load_groot_with_lora
+        from infer_groot_async import is_lora_checkpoint, load_groot_with_lora
     except ImportError:
         # Fallback: define inline
         def is_lora_checkpoint(model_path):
@@ -185,7 +183,7 @@ def load_model(checkpoint_path: Path, data_config: str = "so100_dualcam"):
     if is_lora_checkpoint(str(checkpoint_path)):
         print(f"[EVAL] Loading LoRA checkpoint: {checkpoint_path}")
         # Use the LoRA loading function
-        from infer_groot_so101 import load_groot_with_lora
+        from infer_groot_async import load_groot_with_lora
         policy = load_groot_with_lora(
             model_path=str(checkpoint_path),
             embodiment_tag="new_embodiment",

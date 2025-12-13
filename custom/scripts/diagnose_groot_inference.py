@@ -121,7 +121,7 @@ def load_model_for_diagnosis(checkpoint_path: Path, data_config: str = "so100_du
     custom_scripts_path = Path(__file__).parent
     sys.path.insert(0, str(custom_scripts_path))
 
-    from infer_groot_so101 import is_lora_checkpoint, load_groot_with_lora
+    from infer_groot_async import is_lora_checkpoint, load_groot_with_lora
     from gr00t.experiment.data_config import load_data_config
     from gr00t.model.policy import Gr00tPolicy
 

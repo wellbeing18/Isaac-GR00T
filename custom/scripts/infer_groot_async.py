@@ -408,13 +408,15 @@ def load_groot_with_lora(
 class So101RobotInterface:
     """SO101 robot interface with dual cameras (matches infer_groot_so101.py)."""
 
+    # Training-aligned home position (matches typical starting state in training data)
+    # Based on analysis of datasets_groot episodes: [0, -99.3, 100, 50, -1.4, 0.5]
     HOME_POSITION_TRAINING = {
         "shoulder_pan.pos": 0.0,
-        "shoulder_lift.pos": -20.0,
-        "elbow_flex.pos": 20.0,
-        "wrist_flex.pos": 60.0,
-        "wrist_roll.pos": 0.0,
-        "gripper.pos": 5.0,
+        "shoulder_lift.pos": -99.0,
+        "elbow_flex.pos": 100.0,
+        "wrist_flex.pos": 50.0,
+        "wrist_roll.pos": -1.0,
+        "gripper.pos": 0.5,
     }
 
     def __init__(
