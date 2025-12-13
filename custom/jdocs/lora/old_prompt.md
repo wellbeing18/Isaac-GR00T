@@ -185,3 +185,149 @@ python scripts/gr00t_finetune.py \
 1) training batch shuffle
 2) training data sample and visualization
 3) open loop evaluation
+
+python custom/scripts/infer_groot_async.py \
+      --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058/best \
+      --task "pick up the red cube and place it on the white plate" \
+      --denoising-steps 8 \
+      --duration 20 \
+      --go-home-first \
+      --record-imgs
+
+python custom/scripts/infer_groot_async.py \
+      --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058/best \
+      --task "pick up the red cube and place it on the white plate" \
+      --denoising-steps 2 \
+      --duration 30 \
+      --go-home-first \
+      --record-imgs
+
+python custom/scripts/infer_groot_async.py \
+      --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058/best \
+      --task "pick up the red cube and place it on the white plate" \
+      --duration 30 
+
+python custom/scripts/infer_groot_async.py \
+      --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058/best \
+      --task "pick up the red cube and place it on the white plate"\
+      --denoising-steps 4 \
+      --go-home-first \
+      --duration 60
+
+now we have done a new groot finetuning(/home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058 using /home/jrobot/project/Isaac-GR00T/custom/scripts/train_groot_mvp.sh) using new dataset(/home/jrobot/project/XLeRobot/datasets_groot, which is converted and combined from /home/jrobot/project/XLeRobot/datasets/left/pick_and_place, using /home/jrobot/project/Isaac-GR00T/custom/scripts/convert_lerobot_v3_to_groot.py and /home/jrobot/project/Isaac-GR00T/custom/scripts/combine_groot_datasets.py), but when I used inference script command below to do inference, it gave me really bad performance(didn't move much to finish the task), though the model evaluation looks good, the inference performance sucks, please do a deep dive, do tests or collect evidence, then provide your investigation on what to check or how to solve the issue
+
+python custom/scripts/infer_groot_async.py \
+      --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058/best \
+      --task "pick up the red cube and place it on the white plate"\
+      --denoising-steps 4 \
+      --go-home-first \
+      --duration 60
+
+inference log: 
+Tune action head diffusion model: True
+[LoRA] Step 2/3: Loading PEFT adapter...
+[LoRA] Step 3/3: Merging LoRA weights...
+[LoRA] Loading normalization metadata from /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058/best/experiment_cfg/metadata.json
+[LoRA] Loaded normalization stats for 'new_embodiment'
+[LoRA] GR00T model with LoRA loaded successfully!
+[LoRA] GPU memory: 5.09 GB
+Model loaded! Denoising steps: 4
+
+[WARMUP] Running warmup inference...
+[WARMUP] Complete!
+Press ENTER to use provided calibration file associated with the id xlerobot_left_arm, or type 'c' and press ENTER to run calibration: 
+================> SO101 Robot connected (dual cameras)
+
+[RESET] Moving to training-aligned home position...
+-------------------------------- Moving to home pose
+  Using training-aligned home (within training range)
+  Home state: [  0.18 -98.9   97.41  50.64  -0.44   0.49]
+
+[RUN] Starting async inference for 60.0s...
+  Press Ctrl+C to stop early
+
+[ASYNC] Producer and Consumer threads started
+[DEBUG] Chunk 0: state=[  0.2 -98.9  97.4  50.6  -0.4   0.5] -> action=[   2.6 -100.4   97.8   51.3    0.6    0.3] (delta=[ 2.38 -1.45  0.43  0.62  1.   -0.2 ])
+[DEBUG] Chunk 1: state=[  0.2 -98.9  97.4  50.6  -0.4   0.5] -> action=[   2.3 -100.5   98.5   51.9   -0.3    0.3] (delta=[ 2.12 -1.61  1.05  1.3   0.12 -0.2 ])
+[DEBUG] Chunk 2: state=[   1.8 -100.    97.4   51.8    0.1    0.5] -> action=[   3.9 -103.6  101.2   54.1   -0.5    0.6] (delta=[ 2.16 -3.6   3.75  2.28 -0.57  0.07])
+[DEBUG] Chunk 3: state=[  1.9 -99.7  97.4  52.4  -0.1   0.5] -> action=[   2.4 -106.    96.5   58.4    2.2    0.2] (delta=[ 0.42 -6.33 -0.88  6.04  2.31 -0.25])
+[DEBUG] Chunk 4: state=[  2.6 -99.7  97.4  53.2  -1.    0.5] -> action=[   5.5 -104.    97.4   55.5   -0.9    0.9] (delta=[ 2.9  -4.3  -0.05  2.32  0.1   0.45])
+[PRODUCER] Chunk 10: inference=165ms, rate=6.0Hz
+[PRODUCER] Chunk 20: inference=160ms, rate=6.3Hz
+[STATS] t=5s | Producer: 5.8Hz | Consumer: 29.0Hz | Ensembled: 96% | Latency: 37ms
+[PRODUCER] Chunk 30: inference=183ms, rate=5.5Hz
+[PRODUCER] Chunk 40: inference=133ms, rate=7.5Hz
+[PRODUCER] Chunk 50: inference=166ms, rate=6.0Hz
+[STATS] t=10s | Producer: 5.9Hz | Consumer: 29.6Hz | Ensembled: 98% | Latency: 36ms
+[PRODUCER] Chunk 60: inference=115ms, rate=8.7Hz
+[PRODUCER] Chunk 70: inference=167ms, rate=6.0Hz
+[PRODUCER] Chunk 80: inference=173ms, rate=5.8Hz
+[PRODUCER] Chunk 90: inference=173ms, rate=5.8Hz
+[STATS] t=15s | Producer: 6.0Hz | Consumer: 29.8Hz | Ensembled: 99% | Latency: 37ms
+[PRODUCER] Chunk 100: inference=152ms, rate=6.6Hz
+[PRODUCER] Chunk 110: inference=166ms, rate=6.0Hz
+[PRODUCER] Chunk 120: inference=120ms, rate=8.4Hz
+[STATS] t=20s | Producer: 6.0Hz | Consumer: 29.9Hz | Ensembled: 99% | Latency: 36ms
+[PRODUCER] Chunk 130: inference=117ms, rate=8.5Hz
+[PRODUCER] Chunk 140: inference=131ms, rate=7.6Hz
+[PRODUCER] Chunk 150: inference=177ms, rate=5.7Hz
+[STATS] t=25s | Producer: 6.1Hz | Consumer: 30.0Hz | Ensembled: 99% | Latency: 36ms
+[PRODUCER] Chunk 160: inference=162ms, rate=6.2Hz
+[PRODUCER] Chunk 170: inference=135ms, rate=7.4Hz
+[PRODUCER] Chunk 180: inference=133ms, rate=7.5Hz
+[STATS] t=30s | Producer: 6.1Hz | Consumer: 30.0Hz | Ensembled: 99% | Latency: 36ms
+[PRODUCER] Chunk 190: inference=179ms, rate=5.6Hz
+[PRODUCER] Chunk 200: inference=172ms, rate=5.8Hz
+[PRODUCER] Chunk 210: inference=188ms, rate=5.3Hz
+[STATS] t=35s | Producer: 6.1Hz | Consumer: 30.0Hz | Ensembled: 99% | Latency: 36ms
+[PRODUCER] Chunk 220: inference=170ms, rate=5.9Hz
+[PRODUCER] Chunk 230: inference=174ms, rate=5.8Hz
+[PRODUCER] Chunk 240: inference=179ms, rate=5.6Hz
+[STATS] t=40s | Producer: 6.1Hz | Consumer: 30.0Hz | Ensembled: 100% | Latency: 36ms
+[PRODUCER] Chunk 250: inference=133ms, rate=7.5Hz
+[PRODUCER] Chunk 260: inference=174ms, rate=5.8Hz
+[PRODUCER] Chunk 270: inference=140ms, rate=7.1Hz
+[STATS] t=45s | Producer: 6.1Hz | Consumer: 30.1Hz | Ensembled: 100% | Latency: 36ms
+[PRODUCER] Chunk 280: inference=186ms, rate=5.4Hz
+[PRODUCER] Chunk 290: inference=167ms, rate=6.0Hz
+[PRODUCER] Chunk 300: inference=181ms, rate=5.5Hz
+[STATS] t=50s | Producer: 6.1Hz | Consumer: 30.1Hz | Ensembled: 100% | Latency: 36ms
+[PRODUCER] Chunk 310: inference=160ms, rate=6.3Hz
+[PRODUCER] Chunk 320: inference=180ms, rate=5.6Hz
+[PRODUCER] Chunk 330: inference=179ms, rate=5.6Hz
+[STATS] t=55s | Producer: 6.1Hz | Consumer: 30.1Hz | Ensembled: 100% | Latency: 36ms
+[PRODUCER] Chunk 340: inference=187ms, rate=5.4Hz
+[PRODUCER] Chunk 350: inference=187ms, rate=5.3Hz
+[PRODUCER] Chunk 360: inference=169ms, rate=5.9Hz
+[STATS] t=60s | Producer: 6.1Hz | Consumer: 30.1Hz | Ensembled: 100% | Latency: 36ms
+[ASYNC] Stopping threads...
+[ASYNC] Threads stopped
+
+[RESET] Returning to home position...
+-------------------------------- Moving to home pose
+  Using training-aligned home (within training range)
+================> SO101 Robot disconnected
+
+============================================================
+ASYNC INFERENCE RESULTS (with Temporal Ensembling)
+============================================================
+  Duration:           62.4s
+  Producer count:     366
+  Consumer count:     1808
+  Producer rate:      5.9 Hz
+  Consumer rate:      29.0 Hz
+  Stale actions:      0 (0.0%)
+  Ensembled actions:  1802 (99.7%) <- actions with multiple predictions averaged
+  Avg latency:        36ms
+  Max latency:        235ms
+============================================================
+
+[SAVE] Results saved to: async_inference_results.json
+
+
+python custom/scripts/infer_groot_async.py \
+      --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251212_180908058/best \
+      --task "pick up the red cube and place it on the white plate"\
+      --denoising-steps 4 \
+      --go-home-first \
+      --duration 30

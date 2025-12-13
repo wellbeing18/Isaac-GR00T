@@ -739,6 +739,16 @@ class AsyncInferenceEngine:
                     chunk_idx=chunk_idx,
                 )
 
+                # Log first few predictions for debugging
+                if chunk_idx < 5:
+                    delta_0 = actions[0] - state
+                    delta_15 = actions[15] - state
+                    trajectory_delta = actions[15] - actions[0]  # Full horizon movement
+                    get_logger().info(f"[DEBUG] Chunk {chunk_idx}: state={np.round(state, 1)}")
+                    get_logger().info(f"[DEBUG]   action[0]={np.round(actions[0], 1)} (delta={np.round(delta_0, 2)})")
+                    get_logger().info(f"[DEBUG]   action[15]={np.round(actions[15], 1)} (delta={np.round(delta_15, 2)})")
+                    get_logger().info(f"[DEBUG]   horizon_trajectory={np.round(trajectory_delta, 2)} (16-step movement)")
+
                 # Try to put in queue (non-blocking to avoid deadlock)
                 try:
                     # If queue is full, drop oldest prediction
@@ -821,9 +831,19 @@ class AsyncInferenceEngine:
                             self.stats.ensemble_count += 1
                         self.stats.consumer_count += 1
 
+                        # Log first few consumer actions for debugging
+                        should_log = self.stats.consumer_count <= 5
+                        if should_log:
+                            get_logger().info(f"[CONSUMER] Action {self.stats.consumer_count}: target={np.round(ensembled_action, 1)} (from {num_preds} preds)")
+
                     # Send action to robot (with robot lock to avoid serial port collision)
                     with self.robot_lock:
                         self.robot.set_target_state(ensembled_action)
+                        # Read back state for debugging (first 5 actions only)
+                        if should_log:
+                            actual_state = self.robot.get_current_state()
+                            delta = ensembled_action - actual_state
+                            get_logger().info(f"[CONSUMER]   actual={np.round(actual_state, 1)} (error={np.round(delta, 2)})")
 
                     # Save for fallback
                     last_action = ensembled_action.copy()

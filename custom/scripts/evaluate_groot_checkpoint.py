@@ -307,25 +307,30 @@ def evaluate_checkpoint(
     # Run inference on all samples
     print(f"\nRunning inference on {len(samples)} samples...")
     predictions = []
+    baseline_state_copy = []
     ground_truths = []
 
     for sample in tqdm(samples, desc="Inference"):
         try:
             pred = run_inference(policy, sample)
             gt = np.concatenate([sample["action.single_arm"], sample["action.gripper"]])
+            baseline = np.concatenate([sample["state.single_arm"], sample["state.gripper"]])
 
             predictions.append(pred)
+            baseline_state_copy.append(baseline)
             ground_truths.append(gt)
         except Exception as e:
             continue
 
     predictions = np.array(predictions)
+    baseline_state_copy = np.array(baseline_state_copy)
     ground_truths = np.array(ground_truths)
 
     print(f"Evaluated {len(predictions)} samples successfully")
 
     # Compute metrics
     metrics = compute_metrics(predictions, ground_truths)
+    metrics["baseline_state_copy"] = compute_metrics(baseline_state_copy, ground_truths)
     metrics["num_samples"] = len(predictions)
     metrics["checkpoint"] = str(checkpoint_path)
 
@@ -344,6 +349,10 @@ def print_metrics(metrics: Dict, checkpoint_name: str = ""):
 
     # Overall MAE
     print(f"  Overall MAE: {metrics['overall_mae']:.2f}°")
+    if "baseline_state_copy" in metrics and "overall_mae" in metrics["baseline_state_copy"]:
+        b = metrics["baseline_state_copy"]["overall_mae"]
+        delta = metrics["overall_mae"] - b
+        print(f"  Baseline (predict action=state) MAE: {b:.2f}° (Δ={delta:+.2f}°)")
     print()
 
     # Accuracy at thresholds

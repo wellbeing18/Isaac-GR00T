@@ -32,84 +32,97 @@ from tqdm import tqdm
 JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 
 
-def load_sample_frames(dataset_path: Path, num_samples: int = 5) -> List[Dict]:
-    """Load sample frames from the dataset."""
-    import pyarrow.parquet as pq
-    import decord
-    decord.bridge.set_bridge("native")
+def _to_numpy(x):
+    """Convert torch/np inputs to numpy without changing semantics."""
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return x
+
+
+def _to_uint8_image(img: np.ndarray) -> np.ndarray:
+    """
+    Convert an image to uint8 [0, 255] if it is float or other integer dtype.
+    GR00T inference scripts expect uint8 frames.
+    """
+    img = np.asarray(img)
+    if img.dtype == np.uint8:
+        return img
+    if np.issubdtype(img.dtype, np.floating):
+        vmax = float(np.max(img)) if img.size else 0.0
+        # Heuristic: float in [0, 1] -> scale up
+        if vmax <= 1.0:
+            img = img * 255.0
+        return np.clip(np.rint(img), 0, 255).astype(np.uint8)
+    # Integer but not uint8
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def load_sample_frames(
+    dataset_path: Path,
+    num_samples: int = 5,
+    data_config: str = "so100_dualcam",
+    embodiment_tag: str = "new_embodiment",
+) -> List[Dict]:
+    """
+    Load representative samples from a GR00T dataset.
+
+    IMPORTANT: Do not manually decode videos here (paths differ across dataset
+    versions). Instead, use GR00T's `LeRobotSingleDataset`, which correctly
+    handles consolidated `file-*.mp4` layouts and AV1 via `torchvision_av`.
+    """
+    from gr00t.data.dataset import LeRobotSingleDataset
+    from gr00t.experiment.data_config import load_data_config
 
     dataset_path = Path(dataset_path)
-    samples = []
+    samples: List[Dict] = []
 
-    # Load episodes
-    episodes_path = dataset_path / "meta" / "episodes.jsonl"
-    episodes = []
-    with open(episodes_path, "r") as f:
-        for line in f:
-            if line.strip():
-                episodes.append(json.loads(line))
+    data_cfg = load_data_config(data_config)
+    modality_config = data_cfg.modality_config()
 
-    # Load tasks
-    tasks_path = dataset_path / "meta" / "tasks.jsonl"
-    tasks = {}
-    with open(tasks_path, "r") as f:
-        for line in f:
-            if line.strip():
-                task = json.loads(line)
-                tasks[task["task_index"]] = task["task"]
+    dataset = LeRobotSingleDataset(
+        dataset_path=str(dataset_path),
+        modality_configs=modality_config,
+        video_backend="torchvision_av",
+        video_backend_kwargs=None,
+        transforms=None,
+        embodiment_tag=embodiment_tag,
+    )
 
-    data_dir = dataset_path / "data"
-    videos_dir = dataset_path / "videos"
+    num_trajs = len(dataset.trajectory_lengths)
+    if num_trajs == 0:
+        return []
 
-    # Get samples from different episodes
-    sample_eps = episodes[:min(num_samples, len(episodes))]
+    # Pick trajectories spread across the dataset for diversity.
+    n = min(num_samples, num_trajs)
+    traj_ids = np.linspace(0, num_trajs - 1, num=n, dtype=int).tolist()
 
-    for ep in sample_eps:
-        ep_idx = ep["episode_index"]
-        ep_length = ep["length"]
-        task_idx = ep.get("task_index", 0)
-        task_desc = tasks.get(task_idx, "unknown task")
-        chunk_idx = ep.get("chunk_index", 0)  # Get chunk index from episode metadata
-
-        # Get a frame from middle of episode
-        frame_idx = ep_length // 2
-
+    for traj_id in traj_ids:
         try:
-            # Load parquet (LeRobot v3 format: data/chunk-XXX/episode_XXXXXX.parquet)
-            parquet_file = data_dir / f"chunk-{chunk_idx:03d}" / f"episode_{ep_idx:06d}.parquet"
-            table = pq.read_table(parquet_file)
-            df = table.to_pandas()
-            row = df.iloc[frame_idx]
+            traj_len = int(dataset.trajectory_lengths[traj_id])
+            step = max(0, traj_len // 2)
+            obs = dataset.get_step_data(traj_id, step)
 
-            # Load state
-            state = np.array(row["observation.state"], dtype=np.float32)
+            front = _to_uint8_image(_to_numpy(obs["video.front"][0]))
+            wrist = _to_uint8_image(_to_numpy(obs["video.wrist"][0]))
 
-            # Load videos
-            front_video_path = videos_dir / f"observation.images.front_episode_{ep_idx:06d}.mp4"
-            wrist_video_path = videos_dir / f"observation.images.wrist_episode_{ep_idx:06d}.mp4"
+            state_arm = _to_numpy(obs["state.single_arm"][0]).astype(np.float32)
+            state_gripper = _to_numpy(obs["state.gripper"][0]).astype(np.float32)
+            state = np.concatenate([state_arm, state_gripper], axis=0)
 
-            if not front_video_path.exists():
-                front_video_path = videos_dir / f"front_episode_{ep_idx:06d}.mp4"
-            if not wrist_video_path.exists():
-                wrist_video_path = videos_dir / f"wrist_episode_{ep_idx:06d}.mp4"
-
-            front_vr = decord.VideoReader(str(front_video_path))
-            wrist_vr = decord.VideoReader(str(wrist_video_path))
-
-            front_frame = front_vr[frame_idx].asnumpy()
-            wrist_frame = wrist_vr[frame_idx].asnumpy()
+            task = obs.get("annotation.human.task_description", ["unknown task"])
+            if isinstance(task, list):
+                task = task[0] if task else "unknown task"
 
             samples.append({
-                "video.front": front_frame,
-                "video.wrist": wrist_frame,
+                "video.front": front,
+                "video.wrist": wrist,
                 "state": state,
-                "task": task_desc,
-                "episode": ep_idx,
-                "frame": frame_idx,
+                "task": task,
+                "trajectory": traj_id,
+                "step": step,
             })
-
         except Exception as e:
-            print(f"Warning: Could not load episode {ep_idx}: {e}")
+            print(f"Warning: Could not load trajectory {traj_id}: {e}")
             continue
 
     return samples
@@ -482,7 +495,12 @@ def main():
 
     # Load samples
     print(f"\nLoading {args.num_samples} samples from dataset...")
-    samples = load_sample_frames(dataset_path, args.num_samples)
+    samples = load_sample_frames(
+        dataset_path,
+        args.num_samples,
+        data_config="so100_dualcam",
+        embodiment_tag="new_embodiment",
+    )
     if len(samples) == 0:
         print("ERROR: No samples loaded")
         return 1
