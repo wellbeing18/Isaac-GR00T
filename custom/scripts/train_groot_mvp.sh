@@ -15,20 +15,21 @@
 #
 # For quick validation first, run: train_groot_mini_mvp.sh
 #
-# RESUME TRAINING (to continue from 5K to 10K steps):
-#   After initial training completes and validates successfully, run:
+# RESUME TRAINING (to continue from last checkpoint):
+#   After initial training completes, run with --resume to continue.
+#   LR scheduler state is restored automatically (no need to specify --learning-rate).
 #   python scripts/gr00t_finetune.py \
 #       --dataset-path /home/jrobot/project/XLeRobot/datasets_groot \
 #       --output-dir <SAME_OUTPUT_DIR> \
 #       --max-steps 10000 \
-#       --save-steps 500 \
-#       --batch-size 4 \
-#       --learning-rate 1e-4 \
+#       --save-steps 1000 \
+#       --batch-size 16 \
+#       --gradient-accumulation-steps 2 \
 #       --data-config so100_dualcam \
 #       --video-backend torchvision_av \
 #       --lora-rank 16 \
 #       --no-tune_diffusion_model \
-#       --dataloader_num_workers 16 \
+#       --dataloader_num_workers 4 \
 #       --resume
 #
 # Industry Best Practices (per NVIDIA/HuggingFace):
