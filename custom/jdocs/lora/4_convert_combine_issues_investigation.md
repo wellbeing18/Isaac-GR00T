@@ -411,7 +411,7 @@ ffmpeg -i file-000.mp4 -ss 38.4 -to 77.0 -c copy episode_000001.mp4
 - Convert script: `custom/scripts/convert_lerobot_v3_to_groot.py`
 - Combine script: `custom/scripts/combine_groot_datasets.py`
 - Verification script: `custom/scripts/verify_groot_dataset.py`
-- Source dataset: `/home/jrobot/project/XLeRobot/datasets copy/left/pick_and_place`
+- Source dataset: `/home/jrobot/project/XLeRobot/datasets_copy/left/pick_and_place`
 - Combined dataset: `/home/jrobot/project/XLeRobot/datasets_groot`
 - GR00T dataset code: `gr00t/data/dataset.py`
 - GR00T video utils: `gr00t/utils/video.py`

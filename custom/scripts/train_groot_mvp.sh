@@ -93,7 +93,9 @@ echo "Press Ctrl+C to cancel, or Enter to start..."
 read
 
 # Paths
-DATASET_PATH_GROOT="/home/jrobot/project/XLeRobot/datasets_groot"
+# IMPORTANT: Use the VERIFIED dataset (per-episode videos, correct timestamps)
+# DO NOT use datasets_groot - it has video/timestamp misalignment!
+DATASET_PATH_GROOT="/home/jrobot/project/XLeRobot/datasets_copy/left/pick_and_place"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S%3N)
 OUTPUT_DIR="/home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_${TIMESTAMP}"
 ISAAC_GROOT_ROOT="${ISAAC_GROOT_ROOT:-$HOME/project/Isaac-GR00T}"
@@ -124,12 +126,41 @@ python -c "import peft; print(f'PEFT: {peft.__version__}')"
 
 echo ""
 echo "========================================================================"
-echo "Step 2/9: Pre-Training Verification"
+echo "Step 2/9: Pre-Training Dataset Integrity Verification"
 echo "========================================================================"
 
-# Run pre-training verification script
+# Run NEW dataset integrity verification (catches video/timestamp misalignment)
+if [ -f "$CUSTOM_SCRIPTS/verify_dataset_integrity.py" ]; then
+    echo "Running dataset integrity verification (video/action alignment check)..."
+    python "$CUSTOM_SCRIPTS/verify_dataset_integrity.py" \
+        --dataset "$DATASET_PATH_GROOT"
+
+    VERIFY_EXIT_CODE=$?
+    if [ $VERIFY_EXIT_CODE -ne 0 ]; then
+        echo ""
+        echo "========================================================================"
+        echo "ERROR: Dataset integrity verification FAILED!"
+        echo "========================================================================"
+        echo ""
+        echo "This dataset has issues that will cause training to fail:"
+        echo "  - Video/action misalignment (all episodes load same video frame)"
+        echo "  - Model will become 'blind' and ignore vision input"
+        echo ""
+        echo "To fix, use a properly converted dataset with per-episode videos."
+        echo "See: custom/jdocs/lora/6_dataset_training_investigation_report.md"
+        echo ""
+        exit 1
+    fi
+    echo ""
+    echo "Dataset integrity: PASSED"
+else
+    echo "Warning: verify_dataset_integrity.py not found"
+fi
+
+# Run additional training setup verification
 if [ -f "$CUSTOM_SCRIPTS/verify_groot_training_setup.py" ]; then
-    echo "Running pre-training verification..."
+    echo ""
+    echo "Running training setup verification..."
     python "$CUSTOM_SCRIPTS/verify_groot_training_setup.py" \
         --dataset "$DATASET_PATH_GROOT" \
         --skip-videos
@@ -137,12 +168,12 @@ if [ -f "$CUSTOM_SCRIPTS/verify_groot_training_setup.py" ]; then
     VERIFY_EXIT_CODE=$?
     if [ $VERIFY_EXIT_CODE -ne 0 ]; then
         echo ""
-        echo "ERROR: Pre-training verification failed!"
+        echo "ERROR: Training setup verification failed!"
         echo "Fix the issues above before training."
         exit 1
     fi
 else
-    echo "Warning: verify_groot_training_setup.py not found, skipping verification"
+    echo "Warning: verify_groot_training_setup.py not found, skipping setup verification"
 fi
 
 # Check GR00T dataset exists

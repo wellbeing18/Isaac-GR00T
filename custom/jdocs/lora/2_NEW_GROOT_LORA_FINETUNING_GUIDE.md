@@ -111,18 +111,22 @@ The MVP script (`train_groot_mvp.sh`) includes:
 conda activate groot
 cd /home/jrobot/project/Isaac-GR00T
 
-# 2. Verify dataset (optional but recommended)
-python custom/scripts/verify_groot_training_setup.py \
-    --dataset /home/jrobot/project/XLeRobot/datasets_groot
+# 2. CRITICAL: Verify dataset integrity (catches video/action misalignment!)
+python custom/scripts/verify_dataset_integrity.py \
+    --dataset /home/jrobot/project/XLeRobot/datasets_copy/left/pick_and_place \
+    --visual --save-report
 
 # 3. Run 5K training with evaluation (uses train_groot_mvp.sh)
+# NOTE: Script now auto-verifies dataset before training
 bash custom/scripts/train_groot_mvp.sh
 
 # 4. Run inference with best checkpoint
 python custom/scripts/infer_groot_so101.py \
     --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_TIMESTAMP/best \
-    --task "pick red_cube from center"
+    --task "pick up the red cube and place it on the white plate"
 ```
+
+> **WARNING**: Do NOT use `/home/jrobot/project/XLeRobot/datasets_groot` - it has video/timestamp misalignment that causes training to fail silently. See `custom/jdocs/lora/6_dataset_training_investigation_report.md` for details.
 
 ### For New Dataset (LeRobot v3 Format)
 
@@ -152,7 +156,7 @@ python custom/scripts/convert_lerobot_v3_to_groot.py \
 /home/jrobot/project/XLeRobot/datasets
 
 # Working copy for conversion (MODIFY THIS)
-/home/jrobot/project/XLeRobot/datasets copy
+/home/jrobot/project/XLeRobot/datasets_copy
 ```
 
 #### Option A: Single Dataset Conversion
@@ -239,7 +243,7 @@ Video files are copied with new episode indices: `episode_000000.mp4` → `episo
 
 ```bash
 # Create working copy (preserves original)
-cp -r /home/jrobot/project/XLeRobot/datasets "/home/jrobot/project/XLeRobot/datasets copy"
+cp -r /home/jrobot/project/XLeRobot/datasets "/home/jrobot/project/XLeRobot/datasets_copy"
 ```
 
 **Step 2: Convert each task from LeRobot v3 to GR00T format**
@@ -257,7 +261,7 @@ bash custom/scripts/convert_multitask_to_groot.sh --validate-only
 # Option C: Manual conversion (if you need custom paths)
 for task in grasp pick place push reach release; do
     python custom/scripts/convert_lerobot_v3_to_groot.py \
-        --dataset-path "/home/jrobot/project/XLeRobot/datasets copy/left/$task" \
+        --dataset-path "/home/jrobot/project/XLeRobot/datasets_copy/left/$task" \
         --robot-type so101 \
         --dual-camera
 done
@@ -296,7 +300,7 @@ videos/.../chunk-000/                   videos/.../chunk-000/
 
 **Configuration** (edit `convert_multitask_to_groot.sh` to customize):
 ```bash
-DATASETS_BASE="/home/jrobot/project/XLeRobot/datasets copy"  # Working copy!
+DATASETS_BASE="/home/jrobot/project/XLeRobot/datasets_copy"  # Working copy!
 ARM="left"
 ROBOT_TYPE="so101"
 TASKS=("pick" "place" "push" "reach" "grasp" "release")
@@ -306,7 +310,7 @@ TASKS=("pick" "place" "push" "reach" "grasp" "release")
 
 ```bash
 python custom/scripts/combine_groot_datasets.py \
-    --input-dir "/home/jrobot/project/XLeRobot/datasets copy/left" \
+    --input-dir "/home/jrobot/project/XLeRobot/datasets_copy/left" \
     --output "/home/jrobot/project/XLeRobot/datasets_groot"
 ```
 
@@ -314,9 +318,9 @@ Or specify datasets explicitly:
 ```bash
 python custom/scripts/combine_groot_datasets.py \
     --datasets \
-        "/home/jrobot/project/XLeRobot/datasets copy/left/pick" \
-        "/home/jrobot/project/XLeRobot/datasets copy/left/place" \
-        "/home/jrobot/project/XLeRobot/datasets copy/left/push" \
+        "/home/jrobot/project/XLeRobot/datasets_copy/left/pick" \
+        "/home/jrobot/project/XLeRobot/datasets_copy/left/place" \
+        "/home/jrobot/project/XLeRobot/datasets_copy/left/push" \
     --output "/home/jrobot/project/XLeRobot/datasets_groot"
 ```
 
@@ -383,7 +387,7 @@ Key verification checks:
 You can also verify the source dataset before combination:
 ```bash
 python custom/scripts/verify_groot_dataset.py \
-    --dataset "/home/jrobot/project/XLeRobot/datasets copy/left/pick_and_place" \
+    --dataset "/home/jrobot/project/XLeRobot/datasets_copy/left/pick_and_place" \
     --source --verbose
 ```
 

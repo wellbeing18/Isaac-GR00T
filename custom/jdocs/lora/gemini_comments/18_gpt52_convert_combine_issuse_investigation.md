@@ -327,7 +327,7 @@ This catches the exact class of “counts match but supervision is wrong” fail
 Keep raw data immutable:
 
 - Source: `/home/jrobot/project/XLeRobot/datasets/left/pick_and_place`
-- Working: `/home/jrobot/project/XLeRobot/datasets copy/left/pick_and_place`
+- Working: `/home/jrobot/project/XLeRobot/datasets_copy/left/pick_and_place`
 
 ### Step 1 — Convert using Strategy B2 (file-aware chunk remapping)
 

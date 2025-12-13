@@ -38,7 +38,7 @@ GPT's baseline analysis: `action := state` achieves **1.41° MAE**. Since action
 
 The source dataset has **per-episode videos**:
 ```
-/home/jrobot/project/XLeRobot/datasets copy/left/pick_and_place/videos/
+/home/jrobot/project/XLeRobot/datasets_copy/left/pick_and_place/videos/
   observation.images.head/chunk-000/
     episode_000000.mp4
     episode_000001.mp4
@@ -64,7 +64,7 @@ The current scripts have safeguards, but `datasets_groot` predates them or bypas
 **Option A (Recommended)**: Use source dataset directly
 ```bash
 # Source already has per-episode videos
-DATASET="/home/jrobot/project/XLeRobot/datasets copy/left/pick_and_place"
+DATASET="/home/jrobot/project/XLeRobot/datasets_copy/left/pick_and_place"
 ```
 
 **Option B**: Re-run conversion with video splitting

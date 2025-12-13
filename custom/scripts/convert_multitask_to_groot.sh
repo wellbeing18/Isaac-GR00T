@@ -27,8 +27,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ISAAC_GROOT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 # IMPORTANT: Use the working copy, not the original dataset
 # Original: /home/jrobot/project/XLeRobot/datasets (DO NOT MODIFY)
-# Working copy: /home/jrobot/project/XLeRobot/datasets copy (MODIFY THIS)
-DATASETS_BASE="/home/jrobot/project/XLeRobot/datasets copy"
+# Working copy: /home/jrobot/project/XLeRobot/datasets_copy (MODIFY THIS)
+DATASETS_BASE="/home/jrobot/project/XLeRobot/datasets_copy"
 
 # Conversion script
 CONVERT_SCRIPT="${ISAAC_GROOT_ROOT}/custom/scripts/convert_lerobot_v3_to_groot.py"
