@@ -389,16 +389,88 @@ def create_app(default_dataset: str = DEFAULT_DATASET) -> gr.Blocks:
             outputs=[timeline_slider],
         )
 
-        # Auto-play functionality (using JavaScript for smooth playback)
-        play_state = gr.State(False)
+        # Auto-play functionality with synchronized video and plots
+        play_state = gr.State({"playing": False, "speed": 1.0})
 
-        def toggle_play(is_playing):
-            return not is_playing, "Pause" if not is_playing else "Play"
+        def toggle_play(play_info, current_frame, show_rec, show_pred):
+            """Toggle play/pause state."""
+            is_playing = not play_info["playing"]
+            play_info["playing"] = is_playing
+            btn_text = "⏸ Pause" if is_playing else "▶ Play"
+            return play_info, btn_text
 
+        def advance_frame(play_info, current_frame, show_rec, show_pred):
+            """Advance frame during playback. Returns updated frame and UI."""
+            if not play_info["playing"] or state.episode_data is None:
+                # Not playing, return current state without re-rendering
+                # Use gr.update() to skip unnecessary updates
+                return (
+                    gr.update(),  # timeline_slider - no change
+                    gr.update(),  # head_image - no change
+                    gr.update(),  # wrist_image - no change
+                    gr.update(),  # joint_plots - no change
+                    gr.update(),  # frame_info - no change
+                    gr.update(),  # values_display - no change
+                    play_info,
+                )
+
+            # Advance frame
+            new_frame = int(current_frame) + 1
+
+            # Check if we've reached the end
+            if new_frame >= state.episode_data.length:
+                # Stop playback and reset to beginning
+                play_info["playing"] = False
+                new_frame = 0
+
+            # Get updated visuals
+            head_frame, wrist_frame, plot, frame_info_text, values_text = update_frame(
+                new_frame, show_rec, show_pred
+            )
+
+            return (
+                new_frame,
+                head_frame,
+                wrist_frame,
+                plot,
+                frame_info_text,
+                values_text,
+                play_info,
+            )
+
+        # Play button toggles state
         play_btn.click(
             fn=toggle_play,
-            inputs=[play_state],
+            inputs=[play_state, timeline_slider, show_recorded, show_predicted],
             outputs=[play_state, play_btn],
+        )
+
+        # Timer-based playback using Gradio's every() for continuous updates
+        # This creates a periodic callback that advances frames when playing
+        timer = gr.Timer(value=0.033, active=True)  # ~30 FPS
+
+        timer.tick(
+            fn=advance_frame,
+            inputs=[play_state, timeline_slider, show_recorded, show_predicted],
+            outputs=[
+                timeline_slider,
+                head_image,
+                wrist_image,
+                joint_plots,
+                frame_info,
+                values_display,
+                play_state,
+            ],
+        )
+
+        # Update play button text when playback stops (e.g., end of episode)
+        def update_play_btn_text(play_info):
+            return "⏸ Pause" if play_info["playing"] else "▶ Play"
+
+        play_state.change(
+            fn=update_play_btn_text,
+            inputs=[play_state],
+            outputs=[play_btn],
         )
 
     return app
