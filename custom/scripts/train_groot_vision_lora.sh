@@ -66,3 +66,4 @@ python -W ignore scripts/gr00t_finetune.py \
 echo ""
 echo "Training finished. Run evaluation/inference on: $OUTPUT_DIR/best"
 
+

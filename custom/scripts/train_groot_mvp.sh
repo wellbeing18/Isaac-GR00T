@@ -613,3 +613,4 @@ echo "  2. Check diagnosis - all tests should pass"
 echo "  3. Run real robot inference with infer_groot_so101.py"
 echo ""
 
+

@@ -242,3 +242,90 @@ python custom/scripts/infer_groot_async.py \
       --task "pick up the red cube and place it on the white plate" \
       --duration 30 \
       --no-ensemble
+
+  Summary: Dataset Quality Analysis
+
+  I've analyzed your dataset and compared it with the reference dataset (https://huggingface.co/datasets/youliangtan/so101-table-cleanup). Here are the key findings:
+
+  Key Issues Found
+
+  | Metric                 | Your Dataset     | Reference       | Issue                |
+  |------------------------|------------------|-----------------|----------------------|
+  | ARM movement starts at | 3.8s (frame 113) | 0.5s (frame 16) | 7x slower to start   |
+  | Movement velocity      | 0.30°/frame      | 0.76°/frame     | 2.5x slower movement |
+  | Active movement %      | 86.8%            | 92.8%           | 6% less useful data  |
+  | Elbow range            | 112°             | 155°            | -43° less coverage   |
+  | Wrist flex range       | 54°              | 106°            | -51° less coverage   |
+
+  Answers to Your Questions
+
+  1. Why does the video show slow wrist turning at start?
+
+  The data confirms this: wrist movement starts at frame 63 (2.1s) but ARM movement doesn't start until frame 113-203 (3.8-6.8s). During this gap, you're slowly
+  adjusting/preparing while recording has already started.
+
+  2. Should you move faster at 30Hz?
+
+  YES! At 30Hz, each frame is 33ms apart. The reference dataset has ~2.5x faster movement velocity (0.76°/frame vs your 0.30°/frame). Your current slow movements mean:
+  - Many frames have nearly identical joint positions
+  - Model learns "small changes are correct"
+  - Inference produces tiny action deltas → robot barely moves
+
+  Tools Created
+
+  1. custom/scripts/verify_dataset_quality.py - Compares your dataset with reference
+  python custom/scripts/verify_dataset_quality.py \
+      -d /path/to/your/dataset \
+      -r youliangtan/so101-table-cleanup
+  2. Visualization Commands (from https://wiki.seeedstudio.com/lerobot_so100m_new/#visualize-the-dataset):
+  # Visualize your dataset
+  lerobot-dataset-viz --repo-id local/pick_and_place --root /path/to/dataset
+
+  # Replay episode on robot
+  lerobot-replay --robot.type=so101_follower --dataset.episode=0 ...
+
+  Recommendations
+
+  1. Start immediately when recording begins (< 0.5s delay)
+  2. Move 2-3x faster during demonstrations
+  3. Exercise full joint ranges (especially elbow and wrist_flex)
+  4. Press RIGHT ARROW as soon as task completes
+
+  Sources:
+  - https://huggingface.co/datasets/youliangtan/so101-table-cleanup
+  - https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning
+  - https://wiki.seeedstudio.com/lerobot_so100m_new/#visualize-the-dataset
+
+ - scripts/eval_policy.py - NVIDIA official open-loop evaluation (uses calc_mse_for_single_trajectory)
+ - custom/scripts/verify_dataset_integrity.py - Pre-training dataset verification
+ - custom/scripts/train_groot_mvp.sh - Current training script with 10K steps, LoRA rank 64
+
+TODOs:
+- current dataset issues:
+  - slow start: script help trim
+  - move too slow 2-3X faster
+  - multiple tasks in each episodes
+- use script to verify or visualize after data collection sample
+- metrics to use
+  - mae, open loop mae
+- train on reference dataset (youliangtan), compare MAE
+  - get reference baseline
+- use simulation?
+
+- key training verification mindset: is there any way we can do 1% of the training but verify if the training is progressing good, so we can finish it, or if there are something wrong, which we should stop it to investigate without wasting the whole training  
+  - key problem we are facing: the long chain of process, there could embed some errors we didn't notice or hard to notice, we had done several training, but the results were robot arm barely move after 10K training steps, so we have to step back and systematically think about this issue in terms of predictable experiments mindset explained above. we need to use predictable metrics or indicators or tools, then setup experiments which requires minimal resources, verify and prove the validity of data, training, inference etc before we commit to full training process(this mindset I learned from how openai researchers today do llm model research, it is too expensive both time and money to do a full training but later found that there are bugs or issues which voided the whole training)
+  - what is the best metrics, experiments, or tools to verify this  
+  - what logs we should records to help us later narrow down the area of potential issues if the experiment failed: for example, still issue in data, training pipeline, inference pipeline or robot arm cfg etc  
+  - key experiments we should setup, key metrics, or indicators we should use to verify
+    - some of my ideas: but you can push back or propose better methods
+      - smaller lora rank?
+      - how to verify open loop mae fitting
+  - you need to use simple examples or proof to prove the validity of the methods, and why that can work
+
+questions: 1) you need to use examples to prove existing or newly proposed methods: Pre-Training Verification, early training verification, etc  2) for "3. Early Training Verification ", first it is not the first time we run the training, previous training runs without any issue on the surface: like loss or memory(so I don't think we need the 100 steps verification), the key issue is on we need new metrics or indicator which can better tell us later inference performance, the metric I can think of is open loop mae(better you can research to see if there are better ways), which used in: https://github.com/NVIDIA/Isaac-GR00T/blob/4af2b622892f7dcb5aae5a3fb70bcb02dc217b96/getting_started/3_0_new_embodiment_finetuning.md, https://github.com/NVIDIA/Isaac-GR00T/blob/main/getting_started/2_finetuning.ipynb. how to quantitatively evaluate it, and visually evaluate it, should we capture an evaluation with both number and pic at step 500 then compare with at step 1000? also how do you justify the possibility that at first 500 or 1000 steps, we could not see meaningful progress on open loop mae, your "Pass/Fail Criteria " looks suspicious to me, it is pure assumption, is it realistic? 3) each verification method should have some assumptions, which you need to use logs/metrics to verify, so that later we can prove or disapprove our assumptions, which can help either revise our methods or narrow down to the issues 
+
+you need to overhall your plans, to me there are too many assumptions without scientific research mindset, which is experiments based or facts based 
+
+your argument is contradicting: "Pre-trained GR1 model on demo dataset: Mean MSE = 3.25, Std = 0.73", its 
+
+key symptom and issue is robot arm barely move

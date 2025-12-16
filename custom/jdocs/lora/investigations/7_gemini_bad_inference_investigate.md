@@ -86,3 +86,4 @@ While waiting for training, use the `infer_groot_stable.py` script with the adde
 *   Ensure the "Home" position always has the target object clearly visible in the center crop (224x224).
 *   Avoid "hovering" at the home position without movement; start the task immediately to reduce ambiguous data points.
 
+
