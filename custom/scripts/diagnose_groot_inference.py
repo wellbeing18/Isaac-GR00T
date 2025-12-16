@@ -128,7 +128,7 @@ def load_sample_frames(
     return samples
 
 
-def load_model_for_diagnosis(checkpoint_path: Path, data_config: str = "so100_dualcam"):
+def load_model_for_diagnosis(checkpoint_path: Path, data_config: str = "so100_dualcam", denoising_steps: int = 4):
     """Load model with detailed logging."""
     # Add custom scripts to path
     custom_scripts_path = Path(__file__).parent
@@ -148,6 +148,8 @@ def load_model_for_diagnosis(checkpoint_path: Path, data_config: str = "so100_du
     print(f"Loading model from: {checkpoint_path}")
     print(f"{'='*70}")
 
+    print(f"Denoising steps: {denoising_steps}")
+
     if is_lora_checkpoint(str(checkpoint_path)):
         print("Checkpoint type: LoRA (PEFT adapter)")
         policy = load_groot_with_lora(
@@ -155,7 +157,7 @@ def load_model_for_diagnosis(checkpoint_path: Path, data_config: str = "so100_du
             embodiment_tag="new_embodiment",
             modality_config=modality_config,
             modality_transform=modality_transform,
-            denoising_steps=4,
+            denoising_steps=denoising_steps,
             merge_weights=True,
         )
     else:
@@ -165,7 +167,7 @@ def load_model_for_diagnosis(checkpoint_path: Path, data_config: str = "so100_du
             embodiment_tag="new_embodiment",
             modality_config=modality_config,
             modality_transform=modality_transform,
-            denoising_steps=4,
+            denoising_steps=denoising_steps,
         )
 
     return policy
@@ -304,7 +306,7 @@ def test_input_responsiveness(policy, sample: Dict, verbose: bool = False) -> Di
         results["image_sensitivity"]["passed"] = True
 
     # Test 3: Consistency (same inputs should give same output)
-    print("\n  4. Consistency test (same inputs, 3 runs):")
+    print("\n  4. Consistency test (same inputs, 3 runs WITHOUT seed):")
     actions = []
     for i in range(3):
         action, _ = run_inference_with_logging(
@@ -313,19 +315,45 @@ def test_input_responsiveness(policy, sample: Dict, verbose: bool = False) -> Di
         actions.append(action)
         print(f"    Run {i+1}: {action[:3]}...")
 
-    action_std = np.std(actions, axis=0)
+    action_std_no_seed = np.std(actions, axis=0)
+    print(f"    Mean std (no seed): {np.mean(action_std_no_seed):.2f}°")
+
+    # Test 3b: Consistency with fixed seed
+    print("\n  5. Consistency test (same inputs, 3 runs WITH fixed seed):")
+    actions_seeded = []
+    for i in range(3):
+        torch.manual_seed(42)
+        np.random.seed(42)
+        action, _ = run_inference_with_logging(
+            policy, front_img, wrist_img, state, task, verbose=False
+        )
+        actions_seeded.append(action)
+        print(f"    Run {i+1}: {action[:3]}...")
+
+    action_std_seeded = np.std(actions_seeded, axis=0)
+    print(f"    Mean std (with seed): {np.mean(action_std_seeded):.4f}°")
+
+    # Use the seeded version for the pass/fail check
+    action_std = action_std_seeded
     results["consistency"] = {
-        "std": action_std.tolist(),
-        "mean_std": float(np.mean(action_std)),
+        "std_no_seed": action_std_no_seed.tolist(),
+        "mean_std_no_seed": float(np.mean(action_std_no_seed)),
+        "std_seeded": action_std_seeded.tolist(),
+        "mean_std_seeded": float(np.mean(action_std_seeded)),
     }
 
-    if np.mean(action_std) > 1.0:
-        print(f"\n  ⚠️  WARNING: Model outputs inconsistent!")
-        print(f"      Mean std: {np.mean(action_std):.2f}° (should be < 0.5°)")
+    if np.mean(action_std_seeded) > 0.01:
+        print(f"\n  ⚠️  WARNING: Model outputs inconsistent even with fixed seed!")
+        print(f"      Mean std: {np.mean(action_std_seeded):.4f}° (should be ~0°)")
         results["consistency"]["passed"] = False
+    elif np.mean(action_std_no_seed) > 1.0:
+        print(f"\n  ⚠️  NOTE: Model is stochastic (std={np.mean(action_std_no_seed):.2f}° without seed)")
+        print(f"      But with fixed seed, outputs are consistent (std={np.mean(action_std_seeded):.4f}°)")
+        results["consistency"]["passed"] = True
+        results["consistency"]["stochastic_nature"] = True
     else:
         print(f"\n  ✓ Model outputs are consistent")
-        print(f"    Mean std: {np.mean(action_std):.4f}°")
+        print(f"    Mean std: {np.mean(action_std_seeded):.4f}°")
         results["consistency"]["passed"] = True
 
     return results
@@ -479,6 +507,12 @@ def main():
         type=str,
         help="Path to save diagnosis results JSON"
     )
+    parser.add_argument(
+        "--denoising-steps",
+        type=int,
+        default=4,
+        help="Number of denoising steps for flow matching (default: 4, try 16+ for stability)"
+    )
 
     args = parser.parse_args()
 
@@ -508,7 +542,7 @@ def main():
 
     # Load model
     try:
-        policy = load_model_for_diagnosis(checkpoint_path)
+        policy = load_model_for_diagnosis(checkpoint_path, denoising_steps=args.denoising_steps)
     except Exception as e:
         print(f"ERROR: Failed to load model: {e}")
         traceback.print_exc()

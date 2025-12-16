@@ -177,9 +177,18 @@ class TemporalEnsembleBuffer:
         Action at step 10 = average(Inf1[10], Inf2[2])
     """
 
-    def __init__(self, action_dim: int = 6, max_predictions: int = 4):
+    def __init__(self, action_dim: int = 6, max_predictions: int = 4, use_first_n_actions: int = None):
+        """
+        Args:
+            action_dim: Dimension of action space
+            max_predictions: Maximum overlapping predictions to keep
+            use_first_n_actions: Only use first N actions from each prediction.
+                                 If None, uses full horizon. This helps when the model
+                                 predicts trajectories that oscillate back to origin.
+        """
         self.action_dim = action_dim
         self.max_predictions = max_predictions
+        self.use_first_n_actions = use_first_n_actions  # Truncate horizon if set
         self.predictions = []  # List of dicts with 'start_step', 'actions', 'timestamp'
         self.execution_step = 0  # Global execution step counter
         self.lock = threading.Lock()
@@ -193,6 +202,10 @@ class TemporalEnsembleBuffer:
             timestamp: When the observation was captured
         """
         with self.lock:
+            # Optionally truncate to first N actions (avoids oscillating trajectories)
+            if self.use_first_n_actions is not None:
+                actions = actions[:self.use_first_n_actions]
+
             self.predictions.append({
                 'start_step': self.execution_step,
                 'actions': actions.copy(),
@@ -408,15 +421,16 @@ def load_groot_with_lora(
 class So101RobotInterface:
     """SO101 robot interface with dual cameras (matches infer_groot_so101.py)."""
 
-    # Training-aligned home position (matches typical starting state in training data)
-    # Based on analysis of datasets_groot episodes: [0, -99.3, 100, 50, -1.4, 0.5]
+    # Training-aligned home position - matches episode START position
+    # Episodes START and END at this "ready" position before picking
+    # Based on analysis: episodes start at [4.6, -99.3, 100, 50, -1.8, 0.5]
     HOME_POSITION_TRAINING = {
-        "shoulder_pan.pos": 0.0,
-        "shoulder_lift.pos": -99.0,
-        "elbow_flex.pos": 100.0,
-        "wrist_flex.pos": 50.0,
-        "wrist_roll.pos": -1.0,
-        "gripper.pos": 0.5,
+        "shoulder_pan.pos": 0.0,      # episode start: ~0-5°
+        "shoulder_lift.pos": -99.0,   # episode start: -99°
+        "elbow_flex.pos": 100.0,      # episode start: 100°
+        "wrist_flex.pos": 50.0,       # episode start: 50°
+        "wrist_roll.pos": -1.0,       # episode start: -1.8°
+        "gripper.pos": 0.5,           # episode start: 0.5°
     }
 
     def __init__(
@@ -595,7 +609,13 @@ class Gr00tLocalInference:
         get_logger().info(f"Model loaded! Denoising steps: {denoising_steps}")
 
     def get_action(self, front_img: np.ndarray, wrist_img: np.ndarray, state: np.ndarray) -> dict:
-        """Run inference and return action dictionary."""
+        """Run inference and return action dictionary.
+
+        NOTE: We set a fixed random seed before inference to ensure consistent
+        outputs for the same input. The Flow Matching action head uses torch.randn()
+        to sample initial noise, which causes different outputs on each call.
+        See investigation: custom/jdocs/lora/investigations/6_claude_inference_issue_investigation.md
+        """
         obs_dict = {
             "video.front": front_img[np.newaxis, :, :, :],
             "video.wrist": wrist_img[np.newaxis, :, :, :],
@@ -603,6 +623,8 @@ class Gr00tLocalInference:
             "state.gripper": state[5:6][np.newaxis, :].astype(np.float64),
             "annotation.human.task_description": [self.task],
         }
+        # Set fixed seed for deterministic output (prevents arm vibration)
+        torch.manual_seed(42)
         return self.policy.get_action(obs_dict)
 
 
@@ -632,12 +654,16 @@ class AsyncInferenceEngine:
         action_interval: float = 0.033,  # 30Hz
         queue_size: int = 2,
         record_imgs: bool = False,
+        use_first_n_actions: int = None,  # Truncate trajectory to first N actions
+        no_ensemble: bool = False,  # Disable temporal ensembling, use only latest prediction
     ):
         self.robot = robot
         self.inference = inference
         self.action_horizon = action_horizon
         self.action_interval = action_interval
         self.record_imgs = record_imgs
+        self.use_first_n_actions = use_first_n_actions
+        self.no_ensemble = no_ensemble
 
         # Thread-safe queue for passing predictions
         self.prediction_queue = queue.Queue(maxsize=queue_size)
@@ -653,7 +679,19 @@ class AsyncInferenceEngine:
 
         # Temporal Ensembling Buffer - averages overlapping predictions
         # This reduces action variance by sqrt(N) where N = number of overlapping predictions
-        self.ensemble_buffer = TemporalEnsembleBuffer(action_dim=6, max_predictions=4)
+        # use_first_n_actions: Only use first N actions from each prediction (avoids oscillation)
+        # no_ensemble: If True, only keep the latest prediction (max_predictions=1)
+        self.ensemble_buffer = TemporalEnsembleBuffer(
+            action_dim=6,
+            max_predictions=1 if no_ensemble else 4,
+            use_first_n_actions=use_first_n_actions
+        )
+
+        if use_first_n_actions:
+            get_logger().info(f"[ASYNC] Using first {use_first_n_actions} actions from each prediction (truncated horizon)")
+
+        if no_ensemble:
+            get_logger().info(f"[ASYNC] Temporal ensembling DISABLED - using only latest prediction")
 
         # Legacy: Keep for fallback if needed
         self.current_prediction: Optional[ActionPrediction] = None
@@ -677,6 +715,7 @@ class AsyncInferenceEngine:
         self.consumer_thread.start()
 
         get_logger().info("[ASYNC] Producer and Consumer threads started")
+        get_logger().info("[ASYNC] Fixed seed=42 enabled for deterministic model outputs (prevents vibration)")
 
     def stop(self):
         """Stop all threads gracefully."""
@@ -739,8 +778,8 @@ class AsyncInferenceEngine:
                     chunk_idx=chunk_idx,
                 )
 
-                # Log first few predictions for debugging
-                if chunk_idx < 5:
+                # Log first 10 predictions for debugging consistency
+                if chunk_idx < 10:
                     delta_0 = actions[0] - state
                     delta_15 = actions[15] - state
                     trajectory_delta = actions[15] - actions[0]  # Full horizon movement
@@ -748,6 +787,9 @@ class AsyncInferenceEngine:
                     get_logger().info(f"[DEBUG]   action[0]={np.round(actions[0], 1)} (delta={np.round(delta_0, 2)})")
                     get_logger().info(f"[DEBUG]   action[15]={np.round(actions[15], 1)} (delta={np.round(delta_15, 2)})")
                     get_logger().info(f"[DEBUG]   horizon_trajectory={np.round(trajectory_delta, 2)} (16-step movement)")
+                    # Log action consistency check - with fixed seed, consecutive chunks should be similar
+                    if chunk_idx > 0:
+                        get_logger().info(f"[DEBUG]   (fixed seed enabled - actions should be consistent for similar inputs)")
 
                 # Try to put in queue (non-blocking to avoid deadlock)
                 try:
@@ -831,15 +873,15 @@ class AsyncInferenceEngine:
                             self.stats.ensemble_count += 1
                         self.stats.consumer_count += 1
 
-                        # Log first few consumer actions for debugging
-                        should_log = self.stats.consumer_count <= 5
+                        # Log first 20 consumer actions for debugging
+                        should_log = self.stats.consumer_count <= 20
                         if should_log:
                             get_logger().info(f"[CONSUMER] Action {self.stats.consumer_count}: target={np.round(ensembled_action, 1)} (from {num_preds} preds)")
 
                     # Send action to robot (with robot lock to avoid serial port collision)
                     with self.robot_lock:
                         self.robot.set_target_state(ensembled_action)
-                        # Read back state for debugging (first 5 actions only)
+                        # Read back state for debugging (first 20 actions only)
                         if should_log:
                             actual_state = self.robot.get_current_state()
                             delta = ensembled_action - actual_state
@@ -1022,6 +1064,19 @@ Edit this file to change default ports/cameras without command-line args.
         help=f"Time between actions in seconds (default from config: {default_interval})",
     )
     parser.add_argument(
+        "--use-first-n-actions",
+        type=int,
+        default=None,
+        help="Only use first N actions from each prediction. Helps when model predicts "
+             "oscillating trajectories (e.g., --use-first-n-actions 4 uses only first 4 of 16 actions)",
+    )
+    parser.add_argument(
+        "--no-ensemble",
+        action="store_true",
+        help="Disable temporal ensembling - use only the latest prediction. "
+             "Helps when ensembling predictions from different states causes oscillation.",
+    )
+    parser.add_argument(
         "--duration",
         type=float,
         default=60.0,
@@ -1124,6 +1179,8 @@ Edit this file to change default ports/cameras without command-line args.
         action_horizon=args.action_horizon,
         action_interval=args.action_interval,
         record_imgs=args.record_imgs,
+        use_first_n_actions=args.use_first_n_actions,
+        no_ensemble=args.no_ensemble,
     )
 
     # Run inference

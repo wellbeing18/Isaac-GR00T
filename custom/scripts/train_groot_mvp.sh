@@ -28,14 +28,15 @@
 #       --data-config so100_dualcam \
 #       --video-backend torchvision_av \
 #       --lora-rank 16 \
-#       --no-tune_diffusion_model \
+#       (removed --no-tune_diffusion_model to enable full finetuning)
 #       --dataloader_num_workers 4 \
 #       --resume
 #
-# Industry Best Practices (per NVIDIA/HuggingFace):
-#   - --no-tune_diffusion_model: CORRECT - freezes DiT, trains projector with LoRA
-#   - 30 FPS action data: CORRECT - industry standard for GR00T and Pi0.5 (upgraded from 5 FPS)
-#   - batch_size=4: CORRECT for RTX 5090 (24GB VRAM)
+# Industry Best Practices (per NVIDIA tutorial):
+#   - DO NOT use --no-tune_diffusion_model for new embodiments
+#   - Full finetuning trains the diffusion model (action head) with LoRA
+#   - 30 FPS action data: CORRECT - industry standard for GR00T
+#   - batch_size=64: RECOMMENDED by NVIDIA (adjust for VRAM)
 #   - learning_rate=1e-4: CORRECT - industry standard
 #
 # FPS Requirements (per 6_fps_upgrade_30hz.md):
@@ -53,17 +54,17 @@ export TRANSFORMERS_NO_ADVISORY_WARNINGS=1
 export TOKENIZERS_PARALLELISM=false
 
 # Training configuration (ADJUST THESE)
-MAX_STEPS=8000       # 5K steps (~1 hour). Use --resume to continue to 10K.
-SAVE_STEPS=1000       # Save checkpoint every 500 steps (10 checkpoints total)
-BATCH_SIZE=16         # Batch size (reduced from 32 to prevent OOM)
-GRAD_ACCUM=2          # Accumulate steps to maintain effective batch size of 32
-LEARNING_RATE=1e-4   # Learning rate (4x higher than default - critical!)
-LORA_RANK=16         # LoRA rank
+MAX_STEPS=10000      # Match NVIDIA tutorial (10K steps)
+SAVE_STEPS=1000      # Save checkpoint every 1000 steps
+BATCH_SIZE=16        # Works with LoRA on 24GB VRAM
+GRAD_ACCUM=4         # Accumulate to effective batch size of 64 (matches tutorial!)
+LEARNING_RATE=1e-4   # Learning rate (same as tutorial default)
+LORA_RANK=64         # Higher LoRA rank for more capacity (full finetuning doesn't fit on 24GB)
 NUM_WORKERS=4        # Dataloader workers (reduced from 8 to prevent RAM OOM)
 VIDEO_BACKEND=torchvision_av # Video backend: torchvision_av (default, tested) or decord (potentially faster, needs validation)
 
 echo "========================================================================"
-echo "GR00T MVP LoRA Training - SO-101 Left Arm"
+echo "GR00T LoRA Finetuning - SO-101 Left Arm (Option A)"
 echo "========================================================================"
 echo ""
 echo "Training Configuration:"
@@ -310,7 +311,6 @@ if command -v unbuffer &> /dev/null; then
         --data-config so100_dualcam \
         --video-backend $VIDEO_BACKEND \
         --lora-rank $LORA_RANK \
-        --no-tune_diffusion_model \
         --save-steps $SAVE_STEPS \
         --gradient-accumulation-steps $GRAD_ACCUM \
         --warmup-ratio 0.05 \
@@ -328,7 +328,6 @@ else
         --data-config so100_dualcam \
         --video-backend $VIDEO_BACKEND \
         --lora-rank $LORA_RANK \
-        --no-tune_diffusion_model \
         --save-steps $SAVE_STEPS \
         --gradient-accumulation-steps $GRAD_ACCUM \
         --warmup-ratio 0.05 \
@@ -613,3 +612,4 @@ echo "  1. Check evaluation MAE - target < 10 degrees"
 echo "  2. Check diagnosis - all tests should pass"
 echo "  3. Run real robot inference with infer_groot_so101.py"
 echo ""
+
