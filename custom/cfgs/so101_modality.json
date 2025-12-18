@@ -1,0 +1,50 @@
+{
+    "_comment": "SO-101 modality configuration for GR00T 1.6 dataset format",
+    "_description": "Defines how concatenated state/action arrays are sliced into joint groups",
+    "_robot": "SO-101 (5 arm joints + 1 gripper = 6 DOF)",
+    "_cameras": ["observation.images.head", "observation.images.left_wrist"],
+
+    "state": {
+        "single_arm": {
+            "start": 0,
+            "end": 5,
+            "_joints": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+        },
+        "gripper": {
+            "start": 5,
+            "end": 6,
+            "_joints": ["gripper"]
+        }
+    },
+
+    "action": {
+        "single_arm": {
+            "start": 0,
+            "end": 5,
+            "_joints": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+        },
+        "gripper": {
+            "start": 5,
+            "end": 6,
+            "_joints": ["gripper"]
+        }
+    },
+
+    "video": {
+        "head": {
+            "original_key": "observation.images.head",
+            "_description": "Head-mounted camera for scene overview"
+        },
+        "wrist": {
+            "original_key": "observation.images.left_wrist",
+            "_description": "Wrist-mounted camera for close-up manipulation"
+        }
+    },
+
+    "annotation": {
+        "human.action.task_description": {
+            "original_key": "task_index",
+            "_description": "Task description from tasks.jsonl via task_index"
+        }
+    }
+}

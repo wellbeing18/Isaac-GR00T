@@ -153,6 +153,7 @@ output/
 outputs/
 eval_images/
 custom/logs
+datasets/
 # Git worktrees
 /wt
 
