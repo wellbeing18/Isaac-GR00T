@@ -12,3 +12,15 @@ so you need to systematically redo a new investigation according to requirements
 - and more research you need to do yourself
 
 finally write your analysis and plans into doc: custom/jdocs/lora/3_inference_issue_investigation_20251206.md
+
+  # Run simple inference script with checkpoint-10000
+  python custom/scripts/infer_groot_simple.py \
+      --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251213_230404914/checkpoint-10000 \
+      --port /dev/ttyACM1 \
+      --head-cam-idx 4 \
+      --wrist-cam-idx 6 \
+      --task "pick the red cube from the table" \
+      --action-horizon 8 \
+      --duration 60 \
+      --go-home-first \
+      --record-imgs

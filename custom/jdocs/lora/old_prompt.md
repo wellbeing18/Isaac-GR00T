@@ -329,3 +329,18 @@ you need to overhall your plans, to me there are too many assumptions without sc
 your argument is contradicting: "Pre-trained GR1 model on demo dataset: Mean MSE = 3.25, Std = 0.73", its 
 
 key symptom and issue is robot arm barely move
+
+1) ignore "5. User's Proposed Experiments" 2) current key Finding: Model DOES predict movements, but robot barely moves. we should focus on this using current trained model. first, from eval pic, can we say though the prediction is not ideal, but at least the performance on the picture should not act "barely move" in inference on robot arm. second if previous argument is solid, then we need to dig down the root cause: 2.1) is there any bug in curernt inference script custom/scripts/infer_groot_async.py. we need to verify against the groot's official inference method: getting_started/5_policy_deployment.md and https://github.com/NVIDIA/Isaac-GR00T/blob/main/getting_started/policy.md. 2.2) so far we don't have a convincing statement explained the discrepancy between ok open-loop eval performance as in pic, and the really poor "barely move" inference performance, we need to find cause or evidence to explain it
+
+
+  # Run simple inference script with checkpoint-10000
+  python custom/scripts/infer_groot_simple.py \
+      --model-path /home/jrobot/project/XLeRobot/outputs/groot_mvp_lora_20251213_230404914/checkpoint-10000 \
+      --port /dev/ttyACM1 \
+      --head-cam-idx 4 \
+      --wrist-cam-idx 6 \
+      --task "pick the red cube from the table" \
+      --action-horizon 8 \
+      --duration 60 \
+      --go-home-first \
+      --record-imgs
