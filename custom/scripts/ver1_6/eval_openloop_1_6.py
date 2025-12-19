@@ -248,7 +248,7 @@ def plot_trajectory_results(
     """
     Plot and save trajectory results comparing ground truth and predicted actions.
 
-    Matches the official gr00t/eval/open_loop_eval.py format for consistency.
+    Matches the format shown in media/open_loop_eval_so100.png reference image.
     """
     actual_steps = len(gt_action)
     action_dim = gt_action.shape[1]
@@ -265,9 +265,10 @@ def plot_trajectory_results(
     if num_plots == 1:
         axes = [axes]
 
-    # Add a global title showing the modality keys (matches official format)
+    # Global title format matching media/open_loop_eval_so100.png
+    modalities = ", ".join(action_keys)
     fig.suptitle(
-        f"Trajectory {traj_id} - State: {', '.join(state_keys)} | Action: {', '.join(action_keys)}",
+        f"Trajectory {traj_id} - Modalities: {modalities}",
         fontsize=16,
         color="blue",
     )
@@ -278,8 +279,8 @@ def plot_trajectory_results(
         # Plot state joints only if dimensions match action
         if state_joints.shape == gt_action.shape:
             ax.plot(state_joints[:, action_idx], label="state joints")
-        ax.plot(gt_action[:, action_idx], label="gt action")
-        ax.plot(pred_action[:, action_idx], label="pred action")
+        ax.plot(gt_action[:, action_idx], label="gt action joints")
+        ax.plot(pred_action[:, action_idx], label="pred action joints")
 
         # Put a dot every ACTION_HORIZON (inference points)
         for j in range(0, actual_steps, action_horizon):
@@ -288,7 +289,7 @@ def plot_trajectory_results(
             else:
                 ax.plot(j, gt_action[j, action_idx], "ro")
 
-        ax.set_title(f"Action {action_idx}")
+        ax.set_title(f"Joint {action_idx}")
         ax.legend()
 
     plt.tight_layout()
@@ -346,8 +347,8 @@ def evaluate_trajectory(
             ], axis=0)
             pred_actions.append(concat_action)
 
-    # Extract ground truth
-    state_joints = extract_state_joints(traj, [f"state.{key}" for key in state_keys])
+    # Extract ground truth (slice all to actual_steps for consistent shapes)
+    state_joints = extract_state_joints(traj, [f"state.{key}" for key in state_keys])[:actual_steps]
     gt_actions = extract_state_joints(traj, [f"action.{key}" for key in action_keys])[:actual_steps]
     pred_actions = np.array(pred_actions)[:actual_steps]
 
