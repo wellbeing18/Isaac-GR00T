@@ -169,41 +169,70 @@ VERIFICATION SUMMARY
 
 ---
 
-## Step 5: Training
+## Step 5: MVP Training (1000 Steps)
 
-### 5a. MVP Training Run (Recommended First)
+### 5a. Run MVP Training
 
-Quick validation that training works (~30 minutes):
+Train for 1000 steps (~1 hour) with checkpoints at 500 and 1000 steps:
 
 ```bash
-MAX_STEPS=500 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
+MAX_STEPS=1000 SAVE_STEPS=500 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
 ```
 
 **Monitor training:**
-- Watch terminal for loss values
-- If using wandb, check dashboard at https://wandb.ai
+- Watch terminal for loss values (should decrease)
+- No wandb/tensorboard - metrics verified via open-loop eval
 
 **Expected behavior:**
 - Loss should decrease from ~1.0 to ~0.1-0.3
 - VRAM usage: ~20-22 GB
 - Speed: ~2-3 steps/second on RTX 5090
 
-### 5b. Full Training
+### 5b. Evaluate Checkpoints
 
-After MVP succeeds, run full training:
+Compare checkpoint-500 vs checkpoint-1000 to verify training is improving:
+
+```bash
+# Evaluate early checkpoint
+python custom/scripts/ver1_6/eval_openloop_1_6.py \
+    --checkpoint outputs/groot_1_6_so101/checkpoint-500 \
+    --output-dir eval_outputs/checkpoint_500 \
+    --num-trajectories 5
+
+# Evaluate MVP checkpoint
+python custom/scripts/ver1_6/eval_openloop_1_6.py \
+    --checkpoint outputs/groot_1_6_so101/checkpoint-1000 \
+    --output-dir eval_outputs/checkpoint_1000 \
+    --num-trajectories 5
+```
+
+### 5c. Compare Checkpoints
+
+| Metric | Checkpoint-500 | Checkpoint-1000 | Decision |
+|--------|----------------|-----------------|----------|
+| MSE | Higher | Lower | If MSE decreased → training working |
+| MAE | Higher | Lower | If MAE improved → proceed to full training |
+
+**Decision criteria:**
+- **Checkpoint-1000 MSE < Checkpoint-500 MSE**: ✅ Training effective, proceed to full training
+- **Checkpoint-1000 MSE ≈ Checkpoint-500 MSE**: ⚠️ Might be plateauing, check loss curve
+- **Checkpoint-1000 MSE > Checkpoint-500 MSE**: ❌ Training issue, debug before continuing
+
+**Note:** Baseline (zero-shot) evaluation is not possible because the base model doesn't have normalization
+parameters for NEW_EMBODIMENT. Compare between training checkpoints instead.
+
+---
+
+## Step 6: Full Training
+
+After MVP shows improvement over baseline:
 
 ```bash
 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
 ```
 
-**Key hyperparameters** (modify in script or via environment):
+**Key hyperparameters** (modify via environment):
 ```bash
-# Examples of customization:
-MAX_STEPS=10000 LEARNING_RATE=5e-5 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
-
-# Disable wandb:
-USE_WANDB=false bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
-
 # Lower batch size if OOM:
 GLOBAL_BATCH_SIZE=8 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
 ```
@@ -211,8 +240,7 @@ GLOBAL_BATCH_SIZE=8 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
 **Training time estimates:**
 | Steps | Approx. Time |
 |-------|--------------|
-| 500   | ~30 min      |
-| 2000  | ~1.5 hours   |
+| 1000  | ~1 hour      |
 | 5000  | ~3 hours     |
 | 10000 | ~6 hours     |
 
@@ -221,11 +249,10 @@ GLOBAL_BATCH_SIZE=8 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
 **Troubleshooting:**
 - CUDA OOM: Reduce `GLOBAL_BATCH_SIZE` to 8 or 4
 - Slow training: Check GPU utilization with `nvidia-smi`
-- wandb errors: Set `USE_WANDB=false` or run `wandb login`
 
 ---
 
-## Step 6: Open-Loop Evaluation
+## Step 7: Open-Loop Evaluation (After Full Training)
 
 Evaluate the finetuned model on dataset trajectories (no robot needed).
 
@@ -279,11 +306,11 @@ EVALUATION SUMMARY
 
 ---
 
-## Step 7: Robot Inference
+## Step 8: Robot Inference
 
 Run inference on the real SO-101 robot.
 
-### 7a. Dry Run (No Robot Actions)
+### 8a. Dry Run (No Robot Actions)
 
 Test the pipeline without moving the robot:
 
@@ -294,7 +321,7 @@ python custom/scripts/ver1_6/infer_groot_so101_1_6.py \
     --task "pick the red cube from the table"
 ```
 
-### 7b. Real Robot Inference
+### 8b. Real Robot Inference
 
 **Before running:**
 1. Power on robot
@@ -364,17 +391,28 @@ generate_rel_stats('datasets/so101_pick_place_groot', EmbodimentTag.NEW_EMBODIME
 # 4. Verify zero-shot (optional but recommended)
 python custom/scripts/ver1_6/verify_zeroshot_1_6.py --dataset datasets/so101_pick_place_groot
 
-# 5. MVP training
-MAX_STEPS=500 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
+# 5. MVP training (1000 steps, saves at 500 and 1000)
+MAX_STEPS=1000 SAVE_STEPS=500 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
 
-# 6. Full training (after MVP succeeds)
+# 6. Evaluate checkpoints - compare 500 vs 1000 to verify training works
+python custom/scripts/ver1_6/eval_openloop_1_6.py \
+    --checkpoint outputs/groot_1_6_so101/checkpoint-500 \
+    --output-dir eval_outputs/checkpoint_500 \
+    --num-trajectories 5
+
+python custom/scripts/ver1_6/eval_openloop_1_6.py \
+    --checkpoint outputs/groot_1_6_so101/checkpoint-1000 \
+    --output-dir eval_outputs/checkpoint_1000 \
+    --num-trajectories 5
+
+# 7. Full training (after MVP shows checkpoint-1000 better than checkpoint-500)
 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
 
-# 7. Evaluate
+# 8. Final evaluation
 python custom/scripts/ver1_6/eval_openloop_1_6.py \
     --checkpoint outputs/groot_1_6_so101/checkpoint-10000
 
-# 8. Robot inference
+# 9. Robot inference
 python custom/scripts/ver1_6/infer_groot_so101_1_6.py \
     --checkpoint outputs/groot_1_6_so101/checkpoint-10000 \
     --task "pick the red cube"

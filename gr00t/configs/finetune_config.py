@@ -108,6 +108,16 @@ class FinetuneConfig:
     warmup_ratio: float = 0.05
     """Proportion of total training steps used for learning rate warm-up."""
 
+    optim: str = "adafactor"
+    """
+    Optimizer choice. Options include:
+      - 'adamw_torch': Standard AdamW (requires ~12GB for optimizer states with 1.6B params)
+      - 'adamw_torch_fused': Fused AdamW (slightly faster, same memory)
+      - 'adafactor': Memory-efficient optimizer (no momentum states, ~6GB less VRAM)
+      - 'paged_adamw_8bit': 8-bit AdamW (requires bitsandbytes)
+    Default: 'adafactor' for 24GB VRAM compatibility with GR00T 1.6's 1.6B trainable params.
+    """
+
     shard_size: int = 2**10
     """Size of the shard to use for the dataset during preloading."""
 

@@ -17,6 +17,13 @@ Decision Notes:
 - Computes per-joint-group metrics (single_arm, gripper)
 
 Usage:
+    # Baseline (raw model - zero-shot)
+    python eval_openloop_1_6.py --checkpoint nvidia/GR00T-N1.6-3B --output-dir eval_outputs/baseline
+
+    # After MVP training (1000 steps)
+    python eval_openloop_1_6.py --checkpoint outputs/groot_1_6_so101/checkpoint-1000
+
+    # After full training
     python eval_openloop_1_6.py --checkpoint outputs/groot_1_6_so101/checkpoint-10000
 
 Reference: gr00t/eval/open_loop_eval.py
@@ -83,6 +90,119 @@ def import_modality_config(config_path: str):
     spec = importlib.util.spec_from_file_location("so101_config", full_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+
+
+def load_base_model_policy(model_path: str, device: str):
+    """
+    Load base model (e.g., nvidia/GR00T-N1.6-3B) with custom modality config.
+
+    The base model's processor doesn't have NEW_EMBODIMENT config, so we need to
+    override it manually.
+    """
+    import torch
+    from transformers import AutoModel, AutoProcessor
+    from gr00t.data.embodiment_tags import EmbodimentTag
+    from gr00t.configs.data.embodiment_configs import MODALITY_CONFIGS
+    from gr00t.data.types import VLAStepData, MessageType
+    import gr00t.model  # noqa: F401 - Register model classes
+
+    # Load model
+    model = AutoModel.from_pretrained(model_path)
+    model.eval()
+    model.to(device=device, dtype=torch.bfloat16)
+
+    # Load processor with modality config override
+    modality_configs_override = {
+        EmbodimentTag.NEW_EMBODIMENT.value: MODALITY_CONFIGS[EmbodimentTag.NEW_EMBODIMENT.value]
+    }
+    processor = AutoProcessor.from_pretrained(
+        model_path,
+        modality_configs=modality_configs_override
+    )
+    processor.eval()
+
+    # Create a policy wrapper that matches Gr00tPolicy interface
+    class BaseModelPolicy:
+        def __init__(self, model, processor, embodiment_tag):
+            self.model = model
+            self.processor = processor
+            self.embodiment_tag = embodiment_tag
+            self.modality_configs = processor.get_modality_configs()[embodiment_tag.value]
+            self.collate_fn = processor.collator
+            self.device = device
+
+            # Extract language key
+            language_keys = self.modality_configs["language"].modality_keys
+            assert len(language_keys) == 1, "Only one language key is supported"
+            self.language_key = language_keys[0]
+
+        def get_modality_config(self):
+            return self.modality_configs
+
+        def get_action(self, observation):
+            """Run inference and return action."""
+            # Unbatch observation
+            unbatched_obs = []
+            batch_size = observation["video"][list(observation["video"].keys())[0]].shape[0]
+            for i in range(batch_size):
+                unbatched_value = {
+                    "video": {k: v[i] for k, v in observation["video"].items()},
+                    "state": {k: v[i] for k, v in observation["state"].items()},
+                    "language": {k: v[i] for k, v in observation["language"].items()},
+                }
+                unbatched_obs.append(unbatched_value)
+
+            # Convert to VLAStepData and process each
+            processed_list = []
+            states_list = []
+            for obs in unbatched_obs:
+                step_data = VLAStepData(
+                    images=obs["video"],
+                    states=obs["state"],
+                    actions={},  # No ground truth actions during inference
+                    text=obs["language"][self.language_key][0],
+                    embodiment=self.embodiment_tag,
+                )
+                states_list.append(step_data.states)
+                # Processor expects messages format
+                messages = [{"type": MessageType.EPISODE_STEP.value, "content": step_data}]
+                processed = self.processor(messages)
+                processed_list.append(processed)
+
+            # Collate processed features
+            batch = self.collate_fn(processed_list)
+            # Move to device and convert to bfloat16
+            batch = {
+                k: v.to(self.device, dtype=torch.bfloat16) if hasattr(v, 'to') and v.dtype in [torch.float32, torch.float64]
+                else v.to(self.device) if hasattr(v, 'to') else v
+                for k, v in batch.items()
+            }
+
+            # Run inference
+            with torch.no_grad():
+                output = self.model.get_action(**batch)
+
+            # Get normalized action predictions
+            normalized_action = output["action_pred"].float()
+
+            # Stack states for decoding
+            batched_states = {}
+            for k in self.modality_configs["state"].modality_keys:
+                batched_states[k] = np.stack([s[k] for s in states_list], axis=0)
+
+            # Decode actions
+            decoded = self.processor.decode_action(
+                normalized_action.cpu().numpy(),
+                self.embodiment_tag,
+                batched_states,
+            )
+
+            # Cast to float32
+            decoded = {k: v.astype(np.float32) for k, v in decoded.items()}
+
+            return decoded, {}
+
+    return BaseModelPolicy(model, processor, EmbodimentTag.NEW_EMBODIMENT)
 
 
 def parse_observation(obs: dict[str, Any], modality_configs: dict[str, Any]) -> dict[str, Any]:
@@ -295,7 +415,9 @@ def main():
     print("=" * 70)
 
     # Validate paths
-    if not Path(args.checkpoint).exists():
+    # Allow HuggingFace model IDs (e.g., "nvidia/GR00T-N1.6-3B") which won't exist as local paths
+    is_hf_model = "/" in args.checkpoint and not Path(args.checkpoint).exists()
+    if not is_hf_model and not Path(args.checkpoint).exists():
         logger.error(f"Checkpoint not found: {args.checkpoint}")
         sys.exit(1)
 
@@ -312,15 +434,22 @@ def main():
 
     # Load policy
     logger.info("\nLoading model...")
-    from gr00t.policy.gr00t_policy import Gr00tPolicy
     from gr00t.data.embodiment_tags import EmbodimentTag
     from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
 
-    policy = Gr00tPolicy(
-        embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
-        model_path=args.checkpoint,
-        device=DEVICE,
-    )
+    # Check if this is a HuggingFace model ID (base model) or local checkpoint
+    if is_hf_model:
+        # For base model, we need custom loading with modality config override
+        logger.info("  Loading base model with custom modality config...")
+        policy = load_base_model_policy(args.checkpoint, DEVICE)
+    else:
+        # For finetuned checkpoints, use standard Gr00tPolicy
+        from gr00t.policy.gr00t_policy import Gr00tPolicy
+        policy = Gr00tPolicy(
+            embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
+            model_path=args.checkpoint,
+            device=DEVICE,
+        )
     logger.info(f"  Model loaded on {DEVICE}")
 
     # Load dataset
