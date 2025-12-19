@@ -66,9 +66,6 @@ ACTION_HORIZON = 16       # Must match training
 OUTPUT_DIR = "eval_outputs/openloop_1_6"
 SAVE_PLOTS = True
 SAVE_METRICS = True
-
-# Joint names for SO-101
-JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 # ============================================================================
 
 # Add project root to path
@@ -245,45 +242,58 @@ def plot_trajectory_results(
     traj_id: int,
     action_horizon: int,
     save_path: str,
-    joint_names: list[str] = None,
+    state_keys: list[str],
+    action_keys: list[str],
 ) -> None:
-    """Plot and save trajectory comparison."""
+    """
+    Plot and save trajectory results comparing ground truth and predicted actions.
+
+    Matches the official gr00t/eval/open_loop_eval.py format for consistency.
+    """
     actual_steps = len(gt_action)
     action_dim = gt_action.shape[1]
 
-    if joint_names is None:
-        joint_names = [f"Joint {i}" for i in range(action_dim)]
+    indices_to_plot = list(range(action_dim))
+    num_plots = len(indices_to_plot)
 
-    fig, axes = plt.subplots(nrows=action_dim, ncols=1, figsize=(12, 3 * action_dim))
+    if num_plots == 0:
+        logger.warning("No valid indices to plot")
+        return
 
-    if action_dim == 1:
+    fig, axes = plt.subplots(nrows=num_plots, ncols=1, figsize=(8, 4 * num_plots))
+
+    if num_plots == 1:
         axes = [axes]
 
-    fig.suptitle(f"Trajectory {traj_id} - Open-Loop Evaluation", fontsize=14)
+    # Add a global title showing the modality keys (matches official format)
+    fig.suptitle(
+        f"Trajectory {traj_id} - State: {', '.join(state_keys)} | Action: {', '.join(action_keys)}",
+        fontsize=16,
+        color="blue",
+    )
 
-    for idx in range(action_dim):
-        ax = axes[idx]
+    for plot_idx, action_idx in enumerate(indices_to_plot):
+        ax = axes[plot_idx]
 
-        # Plot state, ground truth, and prediction
+        # Plot state joints only if dimensions match action
         if state_joints.shape == gt_action.shape:
-            ax.plot(state_joints[:, idx], label="State", alpha=0.7, linewidth=1)
-        ax.plot(gt_action[:, idx], label="Ground Truth", linewidth=2)
-        ax.plot(pred_action[:, idx], label="Prediction", linewidth=2, linestyle="--")
+            ax.plot(state_joints[:, action_idx], label="state joints")
+        ax.plot(gt_action[:, action_idx], label="gt action")
+        ax.plot(pred_action[:, action_idx], label="pred action")
 
-        # Mark inference points
+        # Put a dot every ACTION_HORIZON (inference points)
         for j in range(0, actual_steps, action_horizon):
-            marker = "ro" if j == 0 else "r."
-            ax.plot(j, gt_action[j, idx], marker, markersize=4)
+            if j == 0:
+                ax.plot(j, gt_action[j, action_idx], "ro", label="inference point")
+            else:
+                ax.plot(j, gt_action[j, action_idx], "ro")
 
-        ax.set_title(joint_names[idx] if idx < len(joint_names) else f"Joint {idx}")
-        ax.set_xlabel("Step")
-        ax.set_ylabel("Value")
-        ax.legend(loc="upper right")
-        ax.grid(True, alpha=0.3)
+        ax.set_title(f"Action {action_idx}")
+        ax.legend()
 
     plt.tight_layout()
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.savefig(save_path)
     plt.close()
 
 
@@ -294,7 +304,7 @@ def evaluate_trajectory(
     embodiment_tag,
     action_horizon: int = 16,
     max_steps: int = 300,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict, list[str], list[str]]:
     """Evaluate a single trajectory and return predictions and ground truth."""
     from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
 
@@ -361,7 +371,7 @@ def evaluate_trajectory(
         "num_steps": actual_steps,
     }
 
-    return state_joints, gt_actions, pred_actions, metrics
+    return state_joints, gt_actions, pred_actions, metrics, state_keys, action_keys
 
 
 def main():
@@ -474,28 +484,30 @@ def main():
     # Run evaluation
     logger.info("\nRunning evaluation...")
     all_metrics = []
+    final_action_keys = None  # Store for summary
 
     for traj_id in traj_ids:
         if traj_id >= len(loader):
             logger.warning(f"  Skipping trajectory {traj_id} (out of range)")
             continue
 
-        state_joints, gt_actions, pred_actions, metrics = evaluate_trajectory(
+        state_joints, gt_actions, pred_actions, metrics, state_keys, action_keys = evaluate_trajectory(
             policy, loader, traj_id, EmbodimentTag.NEW_EMBODIMENT,
             action_horizon=ACTION_HORIZON, max_steps=STEPS_PER_TRAJ
         )
 
         metrics["traj_id"] = traj_id
         all_metrics.append(metrics)
+        final_action_keys = action_keys  # Keep track for summary
 
         logger.info(f"  Traj {traj_id}: MSE={metrics['mse']:.6f}, MAE={metrics['mae']:.6f}")
 
-        # Generate plot
+        # Generate plot (matches official gr00t/eval/open_loop_eval.py format)
         if not args.no_plots:
             plot_path = output_dir / f"traj_{traj_id:04d}.png"
             plot_trajectory_results(
                 state_joints, gt_actions, pred_actions, traj_id,
-                ACTION_HORIZON, str(plot_path), JOINT_NAMES
+                ACTION_HORIZON, str(plot_path), state_keys, action_keys
             )
 
     # Aggregate metrics
@@ -521,7 +533,7 @@ def main():
             "std_mae": float(std_mae),
             "per_joint_avg_mse": avg_joint_mse.tolist(),
             "per_joint_avg_mae": avg_joint_mae.tolist(),
-            "joint_names": JOINT_NAMES,
+            "action_keys": final_action_keys,
             "trajectories": all_metrics,
         }
 
@@ -539,10 +551,9 @@ def main():
         print(f"  Overall MSE: {avg_mse:.6f} ± {std_mse:.6f}")
         print(f"  Overall MAE: {avg_mae:.6f} ± {std_mae:.6f}")
         print()
-        print("  Per-Joint MSE:")
-        for i, name in enumerate(JOINT_NAMES):
-            if i < len(avg_joint_mse):
-                print(f"    {name}: {avg_joint_mse[i]:.6f}")
+        print(f"  Per-Action-Key MSE ({', '.join(final_action_keys)}):")
+        for i in range(len(avg_joint_mse)):
+            print(f"    Action {i}: {avg_joint_mse[i]:.6f}")
         print()
 
         # Interpretation
