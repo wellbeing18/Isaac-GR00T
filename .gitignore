@@ -155,7 +155,7 @@ eval_images/
 custom/logs
 datasets/
 eval_outputs/
-
+examples/
 # Git worktrees
 /wt
 
