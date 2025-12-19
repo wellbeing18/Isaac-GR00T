@@ -318,7 +318,7 @@ Test the pipeline without moving the robot:
 python custom/scripts/ver1_6/infer_groot_so101_1_6.py \
     --checkpoint outputs/groot_1_6_so101/checkpoint-10000 \
     --dry-run \
-    --task "pick the red cube from the table"
+    --task "pick up the blocks and place them on the plate"
 ```
 
 ### 8b. Real Robot Inference
@@ -333,7 +333,7 @@ python custom/scripts/ver1_6/infer_groot_so101_1_6.py \
 ```bash
 python custom/scripts/ver1_6/infer_groot_so101_1_6.py \
     --checkpoint outputs/groot_1_6_so101/checkpoint-10000 \
-    --task "pick the red cube from the table" \
+    --task "pick up the blocks and place them on the plate" \
     --duration 30
 ```
 
