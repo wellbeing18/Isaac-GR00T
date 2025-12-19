@@ -85,8 +85,40 @@ GRIPPER_DIM = 1           # gripper position
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Log directory
+LOG_DIR = PROJECT_ROOT / "custom" / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def setup_logging(log_file: Path = None):
+    """Set up logging to both terminal and file."""
+    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+
+    # Create logger
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    # Clear existing handlers
+    logger.handlers.clear()
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter(log_format))
+    logger.addHandler(console_handler)
+
+    # File handler (if log_file provided)
+    if log_file:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter(log_format))
+        logger.addHandler(file_handler)
+        logger.info(f"Logging to: {log_file}")
+
+    return logger
+
+
+# Initialize logger (will be reconfigured in main with file handler)
 logger = logging.getLogger(__name__)
 
 # Global flag for clean shutdown
@@ -192,6 +224,7 @@ class RobotController:
     def __init__(self, hw_config: dict):
         self.port = hw_config.get("robot_arms", {}).get("left", {}).get("port", "/dev/ttyACM1")
         self.use_degrees = hw_config.get("robot_arms", {}).get("left", {}).get("use_degrees", True)
+        self.robot_id = hw_config.get("robot_arms", {}).get("left", {}).get("robot_id", "xlerobot_left_arm")
 
         # Initialize robot connection
         self._init_robot()
@@ -199,25 +232,30 @@ class RobotController:
     def _init_robot(self):
         """Initialize robot connection."""
         try:
-            from lerobot.common.robot_devices.robots.configs import So100RobotConfig
-            from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
+            # LeRobot v3 API (0.4.x)
+            from lerobot.robots.so101_follower import SO101Follower, SO101FollowerConfig
 
-            robot_config = So100RobotConfig()
-            # Update port if needed
-            for name in robot_config.follower_arms:
-                robot_config.follower_arms[name].port = self.port
+            # Create config with port, id (for calibration), and use_degrees
+            robot_config = SO101FollowerConfig(
+                port=self.port,
+                id=self.robot_id,
+                use_degrees=self.use_degrees,
+            )
 
-            self.robot = ManipulatorRobot(robot_config)
+            self.robot = SO101Follower(robot_config)
             self.robot.connect()
 
-            logger.info(f"  Robot connected on {self.port}")
+            logger.info(f"  Robot connected on {self.port} (id={self.robot_id})")
 
-        except ImportError:
-            logger.warning("lerobot not available, using mock robot")
+        except ImportError as e:
+            logger.warning(f"lerobot import failed: {e}")
+            logger.warning("Using mock robot")
             self.robot = None
 
         except Exception as e:
             logger.error(f"Failed to connect to robot: {e}")
+            import traceback
+            traceback.print_exc()
             logger.warning("Using mock robot for testing")
             self.robot = None
 
@@ -227,19 +265,26 @@ class RobotController:
             # Mock state for testing
             return np.zeros(ARM_DIM + GRIPPER_DIM, dtype=np.float32)
 
-        # Read state from robot
+        # Read state from robot (LeRobot v3 API)
         obs = self.robot.get_observation()
-        state = obs.get("observation.state", np.zeros(ARM_DIM + GRIPPER_DIM))
 
-        return state.astype(np.float32)
+        # Extract motor positions in order
+        # LeRobot v3 format: {"shoulder_pan.pos": float, "shoulder_lift.pos": float, ...}
+        motor_names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+        state = np.array([obs[f"{name}.pos"] for name in motor_names], dtype=np.float32)
+
+        return state
 
     def send_action(self, action: np.ndarray):
         """Send action to robot."""
         if self.robot is None:
             return  # Skip for mock robot
 
-        # Send action to robot
-        action_dict = {"action": action}
+        # Convert numpy array to LeRobot v3 action dict format
+        # Format: {"shoulder_pan.pos": float, "shoulder_lift.pos": float, ...}
+        motor_names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+        action_dict = {f"{name}.pos": float(action[i]) for i, name in enumerate(motor_names)}
+
         self.robot.send_action(action_dict)
 
     def disconnect(self):
@@ -315,6 +360,13 @@ def run_inference_loop(
     action_buffer = []
     action_idx = 0
 
+    # Joint names for logging
+    joint_names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+
+    # Track action history for analysis
+    action_history = []
+    state_history = []
+
     while running and (time.time() - start_time) < max_duration:
         loop_start = time.time()
 
@@ -325,6 +377,7 @@ def run_inference_loop(
 
             # Get robot state
             state = robot.get_state()
+            state_history.append(state.copy())
 
             # Format observation
             observation = format_observation(images, state, task)
@@ -342,9 +395,24 @@ def run_inference_loop(
             action_buffer = np.concatenate([arm_actions, gripper_actions], axis=1)
             action_idx = 0
 
-            if step_count % 10 == 0:
-                logger.info(f"Step {step_count}: inference={inf_time*1000:.1f}ms, "
-                           f"buffer_size={len(action_buffer)}")
+            # Log detailed info every 80 steps (every ~16 inferences)
+            if step_count % 80 == 0:
+                logger.info(f"Step {step_count}: inference={inf_time*1000:.1f}ms, buffer_size={len(action_buffer)}")
+                # Log current state
+                state_str = ", ".join([f"{joint_names[i]}={state[i]:.1f}" for i in range(len(state))])
+                logger.info(f"  State: [{state_str}]")
+                # Log first action in buffer (immediate action)
+                action_str = ", ".join([f"{joint_names[i]}={action_buffer[0][i]:.1f}" for i in range(len(action_buffer[0]))])
+                logger.info(f"  Action[0]: [{action_str}]")
+                # Log action delta (action - state)
+                delta = action_buffer[0] - state
+                delta_str = ", ".join([f"{joint_names[i]}={delta[i]:+.1f}" for i in range(len(delta))])
+                logger.info(f"  Delta: [{delta_str}]")
+                # Log gripper state specifically
+                logger.info(f"  Gripper: state={state[-1]:.1f}, action={action_buffer[0][-1]:.1f}, delta={delta[-1]:+.1f}")
+                # Log raw gripper actions across horizon to see pattern
+                gripper_horizon = [action_buffer[i][-1] for i in range(min(8, len(action_buffer)))]
+                logger.info(f"  Gripper horizon[0:8]: {[f'{g:.1f}' for g in gripper_horizon]}")
 
             # Record images if enabled
             if record_images:
@@ -354,6 +422,7 @@ def run_inference_loop(
 
         # Execute action from buffer
         action = action_buffer[action_idx]
+        action_history.append(action.copy())
         robot.send_action(action)
         action_idx += 1
         step_count += 1
@@ -375,6 +444,36 @@ def run_inference_loop(
     if inference_times:
         logger.info(f"  Avg inference time: {np.mean(inference_times)*1000:.1f}ms")
         logger.info(f"  Max inference time: {np.max(inference_times)*1000:.1f}ms")
+
+    # Action statistics
+    if action_history:
+        action_arr = np.array(action_history)
+        state_arr = np.array(state_history) if state_history else None
+
+        logger.info(f"\n{'='*50}")
+        logger.info("Action Statistics (across all steps):")
+        for i, name in enumerate(joint_names):
+            act_min, act_max = action_arr[:, i].min(), action_arr[:, i].max()
+            act_mean, act_std = action_arr[:, i].mean(), action_arr[:, i].std()
+            logger.info(f"  {name}: min={act_min:.1f}, max={act_max:.1f}, mean={act_mean:.1f}, std={act_std:.1f}")
+
+        if state_arr is not None and len(state_arr) > 0:
+            logger.info(f"\nState Statistics (at inference points):")
+            for i, name in enumerate(joint_names):
+                st_min, st_max = state_arr[:, i].min(), state_arr[:, i].max()
+                st_mean, st_std = state_arr[:, i].mean(), state_arr[:, i].std()
+                logger.info(f"  {name}: min={st_min:.1f}, max={st_max:.1f}, mean={st_mean:.1f}, std={st_std:.1f}")
+
+            # Gripper specific analysis
+            logger.info(f"\nGripper Analysis:")
+            gripper_actions = action_arr[:, -1]
+            gripper_states = state_arr[:, -1]
+            logger.info(f"  Gripper action range: [{gripper_actions.min():.1f}, {gripper_actions.max():.1f}]")
+            logger.info(f"  Gripper state range: [{gripper_states.min():.1f}, {gripper_states.max():.1f}]")
+            # Check if gripper ever closes (assuming lower values = closed)
+            gripper_closed_threshold = 20.0  # Adjust based on your gripper calibration
+            num_close_actions = np.sum(gripper_actions < gripper_closed_threshold)
+            logger.info(f"  Actions with gripper < {gripper_closed_threshold}: {num_close_actions}/{len(gripper_actions)}")
 
     logger.info(f"{'='*50}")
 
@@ -419,18 +518,26 @@ def main():
     )
     args = parser.parse_args()
 
+    # Set up logging with timestamped log file
+    global logger
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = LOG_DIR / f"inference_{timestamp}.log"
+    logger = setup_logging(log_file)
+
     # Set up signal handler
     signal.signal(signal.SIGINT, signal_handler)
 
-    print("=" * 70)
-    print("GR00T 1.6 Robot Inference")
-    print("=" * 70)
-    print(f"Checkpoint: {args.checkpoint}")
-    print(f"Task:       {args.task}")
-    print(f"Duration:   {args.duration}s")
-    print(f"Device:     {DEVICE}")
-    print(f"Dry run:    {args.dry_run}")
-    print("=" * 70)
+    logger.info("=" * 70)
+    logger.info("GR00T 1.6 Robot Inference")
+    logger.info("=" * 70)
+    logger.info(f"Checkpoint: {args.checkpoint}")
+    logger.info(f"Task:       {args.task}")
+    logger.info(f"Duration:   {args.duration}s")
+    logger.info(f"Device:     {DEVICE}")
+    logger.info(f"Dry run:    {args.dry_run}")
+    logger.info(f"Log file:   {log_file}")
+    logger.info("=" * 70)
 
     # Validate checkpoint
     if not Path(args.checkpoint).exists():
