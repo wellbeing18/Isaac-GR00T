@@ -30,6 +30,7 @@ class TrainingConfig:
     optim: str = "adamw_torch_fused"
 
     start_from_checkpoint: Optional[str] = None
+    resume_from_checkpoint: Optional[str] = None  # Checkpoint path to resume optimizer/scheduler from
 
     # Mixed precision
     tf32: bool = True

@@ -252,6 +252,104 @@ GLOBAL_BATCH_SIZE=8 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
 
 ---
 
+## Step 6.5: Resume Training (Extended Training)
+
+### When to Resume vs. Start Fresh
+
+**Start Fresh (do NOT resume) when:**
+- Data distribution changed (e.g., added data augmentation)
+- Regularization parameters changed (e.g., added dropout)
+- Architecture changes
+- The model seems broken/unstable
+
+**Resume IS safe when:**
+- Simply training for more steps with SAME settings
+- Continuing training after interruption
+
+### Resume Modes
+
+#### MODE 1: Planned Training (RECOMMENDED)
+Set `MAX_STEPS` to your target upfront. Stop at any checkpoint, evaluate, resume with SAME max_steps.
+
+```bash
+# Start training to 45k
+MAX_STEPS=45000 SAVE_STEPS=3000 bash custom/scripts/ver1_6/train_groot_so101_augmented.sh
+
+# Stop after checkpoint-15000 (Ctrl+C), evaluate it
+# Resume with SAME max_steps - LR schedule continues correctly
+RESUME_FROM=outputs/.../checkpoint-15000 MAX_STEPS=45000 \
+bash custom/scripts/ver1_6/train_groot_so101_augmented.sh
+```
+
+**Why this works:** HuggingFace Trainer saves scheduler state. When you resume with same `max_steps`, the LR continues from where it left off.
+
+#### MODE 2: Extend Training (Beyond original max_steps)
+If you need more steps than originally planned, use constant LR.
+
+```bash
+# Original was 15k, now want 45k - MUST use constant LR
+RESUME_FROM=outputs/.../checkpoint-15000 MAX_STEPS=45000 \
+LR_SCHEDULER_TYPE=constant LEARNING_RATE=1e-5 \
+bash custom/scripts/ver1_6/train_groot_so101_augmented.sh
+```
+
+**Why constant LR:** Cosine scheduler recalculates when max_steps changes, causing LR jumps.
+
+#### MODE 3: Unknown Duration
+Use constant LR from the start if you don't know how long to train.
+
+```bash
+LR_SCHEDULER_TYPE=constant MAX_STEPS=50000 bash custom/scripts/ver1_6/train_groot_so101_augmented.sh
+
+# Later, extend to 100k - no scheduler issues
+RESUME_FROM=outputs/.../checkpoint-50000 MAX_STEPS=100000 \
+bash custom/scripts/ver1_6/train_groot_so101_augmented.sh
+```
+
+### The LR Jump Problem (Why Mode 2 needs constant LR)
+
+**Problem:** When resuming with different `max_steps`, the cosine LR scheduler recalculates:
+
+```
+# Training 15k steps with cosine decay:
+Step 15000: LR = ~1e-12 (near zero, converged)
+
+# Resume with max_steps=45000 (cosine):
+Step 15001: LR = cosine(15001/45000) = ~7.5e-05  # JUMPED UP!
+# This destabilizes the converged model!
+```
+
+**Evidence from experiments:**
+- 15k checkpoint: MAE 2.28°, MSE 10.6 (good)
+- 27k checkpoint (after bad resume): MAE 2.61°, MSE 15.3 (WORSE!)
+- Root cause: LR jumped from 1e-12 to 7.5e-05
+
+### Technical Details
+
+**How proper resume works:**
+1. Script always loads ORIGINAL base model (`nvidia/GR00T-N1.6-3B`)
+2. Checkpoint path passed via `--resume_from_checkpoint`
+3. HuggingFace Trainer loads weights, optimizer, scheduler from checkpoint
+4. Training continues from saved step
+
+**Modified files for resume support:**
+- `gr00t/configs/finetune_config.py` - Added `resume_from_checkpoint`, `lr_scheduler_type`
+- `gr00t/configs/training/training_config.py` - Added `resume_from_checkpoint`
+- `gr00t/experiment/launch_finetune.py` - Passes parameters to config
+- `gr00t/experiment/experiment.py` - Uses resume_from_checkpoint in trainer
+- `custom/scripts/ver1_6/train_groot_so101_augmented.sh` - Full resume support
+
+**Available LR scheduler types:**
+- `cosine` - Default for fresh training (decays to ~0 at max_steps)
+- `constant` - Recommended for extended training
+- `linear` - Linear decay
+- `constant_with_warmup` - Constant after warmup period
+
+**Script auto-detection:**
+The training script reads `trainer_state.json` from checkpoint to detect if you're extending beyond original `max_steps`. It will warn and prompt for confirmation if using cosine scheduler in that case.
+
+---
+
 ## Step 7: Open-Loop Evaluation (After Full Training)
 
 Evaluate the finetuned model on dataset trajectories (no robot needed).

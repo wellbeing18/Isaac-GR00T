@@ -17,13 +17,28 @@ class FinetuneConfig:
 
     # --- Data and Model Paths ---
     base_model_path: str
-    """Path to the pretrained base model checkpoint (e.g., Hugging Face model hub or local directory)."""
+    """Path to the pretrained base model checkpoint (e.g., Hugging Face model hub or local directory).
+    For fresh training: use the original model (e.g., nvidia/GR00T-N1.6-3B)
+    For resume: STILL use the original model - the checkpoint weights will be loaded via resume_from_checkpoint.
+    """
 
     dataset_path: str
     """Path to the dataset root directory containing trajectory data for fine-tuning."""
 
     embodiment_tag: EmbodimentTag
     """Identifier specifying which embodiment (robot configuration) this fine-tuning run targets."""
+
+    # --- Resume Configuration ---
+    resume_from_checkpoint: str | None = None
+    """Path to checkpoint directory to resume from (e.g., outputs/run_name/checkpoint-10000).
+    When set, training will:
+    1. Load base model from base_model_path (for architecture)
+    2. Load weights, optimizer, scheduler from this checkpoint
+    3. Continue training from the checkpoint's step
+
+    IMPORTANT: For proper LR schedule continuation, keep max_steps the same as the original run.
+    If you need to train more steps than originally planned, use lr_scheduler_type='constant'.
+    """
 
     modality_config_path: str | None = None
     """
@@ -107,6 +122,17 @@ class FinetuneConfig:
 
     warmup_ratio: float = 0.05
     """Proportion of total training steps used for learning rate warm-up."""
+
+    lr_scheduler_type: str = "cosine"
+    """
+    Learning rate scheduler type. Options include:
+      - 'cosine': Cosine decay (default for fresh training)
+      - 'constant': Constant LR (recommended for resume/extended training)
+      - 'linear': Linear decay
+      - 'constant_with_warmup': Constant LR after warmup
+    Default: 'cosine' for fresh training. Use 'constant' when resuming from a
+    converged checkpoint to avoid LR schedule recalculation issues.
+    """
 
     optim: str = "adafactor"
     """

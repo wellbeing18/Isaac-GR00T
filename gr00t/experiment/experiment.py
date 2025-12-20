@@ -256,6 +256,17 @@ def run(config: Config):
 
     # Train
     logging.info("🚀 Starting training...")
+
+    # Determine resume_from_checkpoint value:
+    # - If config specifies a checkpoint path, use it
+    # - Otherwise, use True to auto-find latest checkpoint in output_dir
+    resume_checkpoint = config.training.resume_from_checkpoint
+    if resume_checkpoint is None:
+        resume_checkpoint = True  # Auto-find in output_dir
+
+    if resume_checkpoint and resume_checkpoint is not True:
+        logging.info(f"Will resume from checkpoint: {resume_checkpoint}")
+
     if config.training.enable_profiling:
         from functools import partial
 
@@ -280,9 +291,9 @@ def run(config: Config):
             on_trace_ready=partial(on_trace_ready_handler, trainer, profile_dir),
         ) as prof:
             trainer.add_callback(ProfCallback(prof=prof))
-            trainer.train(resume_from_checkpoint=True)
+            trainer.train(resume_from_checkpoint=resume_checkpoint)
     else:
-        trainer.train(resume_from_checkpoint=True)
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
 
     # Save final model
     trainer.save_model()
