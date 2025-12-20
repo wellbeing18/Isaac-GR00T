@@ -10,6 +10,7 @@ Features:
 - Sidebar layout: dataset browser on left, display on right
 - Compact view: cameras + charts visible without scrolling
 - Synchronized video playback with joint data plots
+- Continuous playback with play/pause controls
 
 Usage:
     python visualize_dataset_v2.py [OPTIONS]
@@ -23,14 +24,22 @@ Options:
 
 import argparse
 import json
+import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Setup logging
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("visualizer")
+logger.setLevel(logging.INFO)
 
 import gradio as gr
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from PIL import Image
 
 try:
     import pyarrow.parquet as pq
@@ -265,6 +274,26 @@ def load_episode_data(metadata: DatasetMetadata, episode_index: int) -> EpisodeD
     )
 
 
+def resize_frame(img_array: np.ndarray, max_width: int = 320) -> np.ndarray:
+    """Resize frame to reduce bandwidth while maintaining aspect ratio."""
+    if img_array is None:
+        logger.warning("resize_frame: received None image")
+        return None
+
+    h, w = img_array.shape[:2]
+    logger.debug(f"resize_frame: input shape={img_array.shape}, dtype={img_array.dtype}, max_width={max_width}")
+
+    if w > max_width:
+        scale = max_width / w
+        new_h = int(h * scale)
+        img = Image.fromarray(img_array.astype(np.uint8))
+        img = img.resize((max_width, new_h), Image.Resampling.BILINEAR)
+        result = np.array(img)
+        logger.debug(f"resize_frame: resized to {result.shape}")
+        return result
+    return img_array
+
+
 def extract_video_frame(video_path: Path, frame_index: int) -> Optional[np.ndarray]:
     """Extract a single frame from video."""
     if not video_path.exists():
@@ -348,98 +377,149 @@ def extract_all_frames(video_path: Path) -> Optional[np.ndarray]:
 
 
 # =============================================================================
-# Plotting
+# Plotting - Combined stacked layout with shared x-axis
 # =============================================================================
 
-JOINT_DISPLAY_NAMES = [
-    "Shoulder Pan", "Shoulder Lift", "Elbow Flex",
-    "Wrist Flex", "Wrist Roll", "Gripper"
-]
+JOINT_NAMES_ARM = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+JOINT_NAME_GRIPPER = "gripper"
 
 COLORS = {
-    "state": "#3b82f6",      # Blue
-    "action": "#22c55e",     # Green
-    "marker": "#f97316",     # Orange
+    "shoulder_pan": "#ef4444",    # Red
+    "shoulder_lift": "#22c55e",   # Green
+    "elbow_flex": "#3b82f6",      # Blue
+    "wrist_flex": "#f59e0b",      # Amber
+    "wrist_roll": "#8b5cf6",      # Purple
+    "gripper": "#ef4444",         # Red
+    "state": "solid",
+    "action": "dash",
+    "marker": "#f97316",          # Orange
 }
 
 
-def generate_compact_plots(
+def generate_combined_plot(
     episode: EpisodeData,
     current_frame: int = 0,
-    height: int = 400,
+    height: int = 350,
 ) -> go.Figure:
-    """Generate compact 2x3 joint plots for single-page view."""
+    """Generate combined arm joints + gripper plot with shared x-axis."""
 
-    num_joints = min(len(JOINT_DISPLAY_NAMES), episode.states.shape[1])
-
-    # Create 2 rows x 3 cols subplot
+    # Create subplots: 2 rows, shared x-axis
+    # Row 1: Arm joints (taller), Row 2: Gripper (shorter)
     fig = make_subplots(
-        rows=2, cols=3,
+        rows=2, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.12,
-        horizontal_spacing=0.08,
-        subplot_titles=JOINT_DISPLAY_NAMES[:num_joints],
+        vertical_spacing=0.08,
+        row_heights=[0.75, 0.25],
+        subplot_titles=("Arm Joints", "Gripper"),
     )
 
     x_axis = np.arange(episode.length)
+    num_joints = min(5, episode.states.shape[1])
 
-    for i in range(num_joints):
-        row = i // 3 + 1
-        col = i % 3 + 1
+    # Row 1: Arm joints
+    for i, joint_name in enumerate(JOINT_NAMES_ARM[:num_joints]):
+        color = COLORS.get(joint_name, "#3b82f6")
 
-        # State line (solid blue)
+        # State line (solid)
         fig.add_trace(
             go.Scatter(
                 x=x_axis,
                 y=episode.states[:, i],
                 mode="lines",
-                name="State",
-                line=dict(color=COLORS["state"], width=1.5),
-                legendgroup="state",
-                showlegend=(i == 0),
+                name=f"{joint_name}",
+                line=dict(color=color, width=1.5),
+                legendgroup=joint_name,
+                showlegend=True,
             ),
-            row=row, col=col,
+            row=1, col=1,
         )
 
-        # Action line (dashed green)
+        # Action line (dashed)
         fig.add_trace(
             go.Scatter(
                 x=x_axis,
                 y=episode.actions[:, i],
                 mode="lines",
-                name="Action",
-                line=dict(color=COLORS["action"], width=1.5, dash="dash"),
-                legendgroup="action",
-                showlegend=(i == 0),
+                name=f"{joint_name} (action)",
+                line=dict(color=color, width=1.5, dash="dash"),
+                legendgroup=joint_name,
+                showlegend=False,
             ),
-            row=row, col=col,
+            row=1, col=1,
         )
 
-        # Current frame marker
-        fig.add_vline(
-            x=current_frame,
-            line_dash="solid",
-            line_color=COLORS["marker"],
-            line_width=2,
-            row=row, col=col,
-        )
+    # Row 2: Gripper
+    gripper_idx = 5  # Gripper is typically the 6th joint (index 5)
+    if episode.states.shape[1] <= gripper_idx:
+        gripper_idx = episode.states.shape[1] - 1
 
+    gripper_color = COLORS["gripper"]
+
+    # State line (solid)
+    fig.add_trace(
+        go.Scatter(
+            x=x_axis,
+            y=episode.states[:, gripper_idx],
+            mode="lines",
+            name="gripper",
+            line=dict(color=gripper_color, width=2),
+            showlegend=True,
+        ),
+        row=2, col=1,
+    )
+
+    # Action line (dashed)
+    fig.add_trace(
+        go.Scatter(
+            x=x_axis,
+            y=episode.actions[:, gripper_idx],
+            mode="lines",
+            name="gripper (action)",
+            line=dict(color=gripper_color, width=2, dash="dash"),
+            showlegend=False,
+        ),
+        row=2, col=1,
+    )
+
+    # Add vertical marker on both subplots
+    fig.add_vline(
+        x=current_frame,
+        line_dash="solid",
+        line_color=COLORS["marker"],
+        line_width=2,
+        row=1, col=1,
+    )
+    fig.add_vline(
+        x=current_frame,
+        line_dash="solid",
+        line_color=COLORS["marker"],
+        line_width=2,
+        row=2, col=1,
+    )
+
+    # Update layout
     fig.update_layout(
         height=height,
-        margin=dict(l=40, r=20, t=40, b=30),
+        margin=dict(l=50, r=20, t=30, b=30),
         legend=dict(
             orientation="h",
             yanchor="bottom",
             y=1.02,
             xanchor="center",
             x=0.5,
+            font=dict(size=9),
         ),
         template="plotly_dark",
         paper_bgcolor="#1f2937",
         plot_bgcolor="#1f2937",
     )
 
-    # Smaller subplot titles
+    # Update axes
+    fig.update_yaxes(title_text="Degrees", row=1, col=1)
+    fig.update_yaxes(title_text="Gripper", row=2, col=1)
+    fig.update_xaxes(title_text="Frame", row=2, col=1)
+
+    # Make subplot titles smaller
     for annotation in fig.layout.annotations:
         annotation.font.size = 10
 
@@ -457,6 +537,8 @@ class VisualizerState:
         self.episode_data: Optional[EpisodeData] = None
         self.video_frames: Dict[str, np.ndarray] = {}
         self.current_frame: int = 0
+        self.max_frame: int = 0  # Track max frame to avoid slider bounds issues
+        self.is_playing: bool = False
 
 
 def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blocks:
@@ -483,7 +565,7 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
                 label = f"Ep {idx}: {task[:30]}..." if len(task) > 30 else f"Ep {idx}: {task}" if task else f"Episode {idx}"
                 choices.append((label, idx))
 
-            status = f"✓ Loaded {state.metadata.total_episodes} episodes ({state.metadata.format_version})"
+            status = f"Loaded {state.metadata.total_episodes} episodes ({state.metadata.format_version})"
             info = f"Robot: {state.metadata.robot_type} | FPS: {state.metadata.fps} | Cameras: {len(state.metadata.video_keys)}"
 
             return (
@@ -492,21 +574,25 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
                 info,
             )
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return (
                 gr.Dropdown(choices=[]),
-                f"✗ Error: {str(e)[:100]}",
+                f"Error: {str(e)[:100]}",
                 "",
             )
 
     def load_episode(episode_index: int) -> Tuple:
         """Load episode data and first frame."""
         if state.metadata is None or episode_index is None:
-            return (None, None, 0, gr.Slider(maximum=1), None, "No episode", "")
+            state.max_frame = 0
+            return (None, None, None, 0, gr.Slider(maximum=1), "No episode", "")
 
         try:
             # Load data
             state.episode_data = load_episode_data(state.metadata, episode_index)
             state.current_frame = 0
+            state.max_frame = state.episode_data.length - 1
 
             # Load video frames for each camera
             state.video_frames = {}
@@ -517,33 +603,28 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
                     state.video_frames[video_key] = frames
 
             # Get first frames
-            cam1_frame = None
-            cam2_frame = None
-            video_keys = list(state.video_frames.keys())
-            if len(video_keys) >= 1:
-                cam1_frame = state.video_frames[video_keys[0]][0]
-            if len(video_keys) >= 2:
-                cam2_frame = state.video_frames[video_keys[1]][0]
+            cam1_frame, cam2_frame = get_frames_for_position(0)
 
-            # Generate plot
-            plot = generate_compact_plots(state.episode_data, current_frame=0)
+            # Generate combined plot
+            combined_plot = generate_combined_plot(state.episode_data, current_frame=0)
 
-            frame_info = f"Frame 0/{state.episode_data.length-1}"
+            frame_info = f"Frame 0/{state.max_frame}"
             task_info = state.episode_data.task
 
             return (
                 cam1_frame,
                 cam2_frame,
+                combined_plot,
                 0,
-                gr.Slider(maximum=state.episode_data.length - 1),
-                plot,
+                gr.Slider(value=0, maximum=state.max_frame),
                 frame_info,
                 task_info,
             )
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return (None, None, 0, gr.Slider(maximum=1), None, f"Error: {e}", "")
+            state.max_frame = 0
+            return (None, None, None, 0, gr.Slider(maximum=1), f"Error: {e}", "")
 
     def update_frame(frame_idx: int) -> Tuple:
         """Update display for current frame."""
@@ -553,27 +634,15 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
         frame_idx = int(frame_idx)
         state.current_frame = frame_idx
 
-        # Get frames
-        cam1_frame = None
-        cam2_frame = None
-        video_keys = list(state.video_frames.keys())
+        # Get frames as numpy arrays
+        cam1_frame, cam2_frame = get_frames_for_position(frame_idx)
 
-        if len(video_keys) >= 1:
-            frames = state.video_frames[video_keys[0]]
-            if frame_idx < len(frames):
-                cam1_frame = frames[frame_idx]
-
-        if len(video_keys) >= 2:
-            frames = state.video_frames[video_keys[1]]
-            if frame_idx < len(frames):
-                cam2_frame = frames[frame_idx]
-
-        # Generate plot
-        plot = generate_compact_plots(state.episode_data, current_frame=frame_idx)
+        # Generate combined plot
+        combined_plot = generate_combined_plot(state.episode_data, current_frame=frame_idx)
 
         frame_info = f"Frame {frame_idx}/{state.episode_data.length-1}"
 
-        return (cam1_frame, cam2_frame, plot, frame_info)
+        return (cam1_frame, cam2_frame, combined_plot, frame_info)
 
     def step_frame(current: int, delta: int) -> int:
         """Step frame by delta."""
@@ -581,6 +650,90 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             return 0
         new_frame = max(0, min(int(current) + delta, state.episode_data.length - 1))
         return new_frame
+
+    def toggle_play(is_playing: bool):
+        """Toggle play/pause state and control timer."""
+        new_state = not is_playing
+        btn_text = "⏸ Pause" if new_state else "▶ Play"
+        logger.info(f"toggle_play: {is_playing} -> {new_state}")
+        return new_state, gr.update(value=btn_text), gr.Timer(active=new_state)
+
+    def get_frames_for_position(frame_idx: int) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Get camera frames for a given position as numpy arrays."""
+        cam1_frame = None
+        cam2_frame = None
+        video_keys = list(state.video_frames.keys())
+
+        logger.debug(f"get_frames_for_position: frame_idx={frame_idx}, video_keys={video_keys}")
+
+        if len(video_keys) >= 1:
+            frames = state.video_frames[video_keys[0]]
+            if frame_idx < len(frames):
+                cam1_frame = resize_frame(frames[frame_idx], max_width=400)
+                logger.debug(f"  cam1_frame: shape={cam1_frame.shape if cam1_frame is not None else None}, dtype={cam1_frame.dtype if cam1_frame is not None else None}")
+
+        if len(video_keys) >= 2:
+            frames = state.video_frames[video_keys[1]]
+            if frame_idx < len(frames):
+                cam2_frame = resize_frame(frames[frame_idx], max_width=400)
+                logger.debug(f"  cam2_frame: shape={cam2_frame.shape if cam2_frame is not None else None}, dtype={cam2_frame.dtype if cam2_frame is not None else None}")
+
+        return cam1_frame, cam2_frame
+
+    def advance_frame(current_frame, speed) -> Tuple:
+        """Advance frame during playback - only called when timer is active."""
+        logger.debug(f"advance_frame CALLED: current_frame={current_frame}, speed={speed}")
+
+        # Handle None inputs
+        if current_frame is None:
+            logger.warning("advance_frame: current_frame is None!")
+            current_frame = state.current_frame if state.current_frame else 0
+        if speed is None:
+            logger.warning("advance_frame: speed is None!")
+            speed = 1
+
+        current_frame = int(current_frame)
+        speed = int(speed)
+
+        if state.episode_data is None or state.max_frame == 0:
+            logger.warning("advance_frame: No episode data, stopping timer")
+            return (gr.update(), gr.update(), gr.update(), 0, gr.Timer(active=False))
+
+        max_frame = state.max_frame
+        current_frame = min(max(0, current_frame), max_frame)
+        new_frame = current_frame + speed
+
+        # End of episode - stop timer
+        if new_frame >= max_frame:
+            new_frame = max_frame
+            state.current_frame = new_frame
+            cam1_frame, cam2_frame = get_frames_for_position(new_frame)
+            logger.info(f"Playback ended at frame {new_frame}")
+            return (
+                cam1_frame,
+                cam2_frame,
+                f"Frame {new_frame}/{max_frame}",
+                int(new_frame),
+                gr.Timer(active=False),  # Stop timer
+            )
+
+        # Playing - update frames
+        state.current_frame = new_frame
+        cam1_frame, cam2_frame = get_frames_for_position(new_frame)
+
+        return (
+            cam1_frame,
+            cam2_frame,
+            f"Frame {new_frame}/{max_frame}",
+            int(new_frame),
+            gr.update(),  # Keep timer running
+        )
+
+    def on_browse_select(selected_path: str) -> str:
+        """Handle browse selection."""
+        if selected_path:
+            return selected_path
+        return gr.update()
 
     # -------------------------------------------------------------------------
     # Build UI
@@ -591,14 +744,14 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
         fill_height=True,
     ) as app:
 
-        gr.Markdown("## 🤖 LeRobot Dataset Visualizer")
+        gr.Markdown("## LeRobot Dataset Visualizer")
 
         with gr.Row():
             # -----------------------------------------------------------------
             # Left Sidebar: Dataset Browser
             # -----------------------------------------------------------------
-            with gr.Column(scale=1, min_width=280, elem_classes=["sidebar"]):
-                gr.Markdown("### 📁 Dataset")
+            with gr.Column(scale=1, min_width=280):
+                gr.Markdown("### Dataset")
 
                 dataset_path = gr.Textbox(
                     label="Path",
@@ -606,13 +759,17 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
                     placeholder="/path/to/dataset",
                 )
 
+                # Browse button with file explorer
+                with gr.Row():
+                    browse_btn = gr.Button("Browse", scale=1)
+
                 format_dropdown = gr.Dropdown(
                     label="Format",
                     choices=[("LeRobot v2", "v2"), ("LeRobot v3", "v3"), ("Auto-detect", "auto")],
                     value=default_format,
                 )
 
-                load_btn = gr.Button("📂 Load Dataset", variant="primary")
+                load_btn = gr.Button("Load Dataset", variant="primary")
 
                 status_text = gr.Textbox(
                     label="Status",
@@ -626,7 +783,7 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
                     lines=1,
                 )
 
-                gr.Markdown("### 📋 Episodes")
+                gr.Markdown("### Episodes")
 
                 episode_dropdown = gr.Dropdown(
                     label="Select Episode",
@@ -641,52 +798,102 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
                 )
 
             # -----------------------------------------------------------------
-            # Right Main Display: Cameras + Timeline + Charts
+            # Right Main Display: Cameras + Charts (stacked vertically)
             # -----------------------------------------------------------------
-            with gr.Column(scale=3, elem_classes=["main-display"]):
+            with gr.Column(scale=3):
 
-                # Camera views side by side
+                # Camera views side by side - close together in center
                 with gr.Row():
-                    with gr.Column(scale=1):
-                        cam1_image = gr.Image(
-                            label="Camera 1 (Head)",
-                            type="numpy",
-                            height=240,
-                        )
-                    with gr.Column(scale=1):
-                        cam2_image = gr.Image(
-                            label="Camera 2 (Wrist)",
-                            type="numpy",
-                            height=240,
-                        )
-
-                # Timeline controls
-                with gr.Row():
-                    prev_10_btn = gr.Button("⏪ -10", scale=1)
-                    prev_btn = gr.Button("◀ -1", scale=1)
-                    frame_info = gr.Textbox(
-                        value="Frame 0/0",
-                        interactive=False,
-                        scale=2,
-                        show_label=False,
+                    gr.Column(scale=1)  # Left spacer
+                    cam1_img = gr.Image(
+                        label="Head Camera",
+                        show_label=True,
+                        height=280,
+                        width=450,
                     )
-                    next_btn = gr.Button("+1 ▶", scale=1)
-                    next_10_btn = gr.Button("+10 ⏩", scale=1)
+                    cam2_img = gr.Image(
+                        label="Wrist Camera",
+                        show_label=True,
+                        height=280,
+                        width=450,
+                    )
+                    gr.Column(scale=1)  # Right spacer
 
+                # Combined arm joints + gripper plot (stacked with shared x-axis)
+                combined_plot = gr.Plot(
+                    label="Joint States (Arm + Gripper)",
+                )
+
+                # Timeline slider - set high default max to avoid bounds errors during async updates
                 timeline_slider = gr.Slider(
                     minimum=0,
-                    maximum=100,
+                    maximum=100000,
                     step=1,
                     value=0,
                     label="Timeline",
                     interactive=True,
                 )
 
-                # Joint plots - compact 2x3 grid
-                joint_plots = gr.Plot(
-                    label="Joint States & Actions",
-                    elem_classes=["compact-plot"],
-                )
+                # Playback controls at the bottom
+                with gr.Row():
+                    prev_10_btn = gr.Button("⏪ -10", scale=1)
+                    prev_btn = gr.Button("◀ -1", scale=1)
+                    play_btn = gr.Button("▶ Play", variant="primary", scale=2)
+                    next_btn = gr.Button("+1 ▶", scale=1)
+                    next_10_btn = gr.Button("+10 ⏩", scale=1)
+                    speed_slider = gr.Slider(
+                        minimum=1,
+                        maximum=10,
+                        step=1,
+                        value=3,
+                        label="Speed",
+                        scale=1,
+                    )
+                    frame_info = gr.Textbox(
+                        value="Frame 0/0",
+                        interactive=False,
+                        scale=2,
+                        show_label=False,
+                    )
+
+        # Hidden state for playback
+        is_playing_state = gr.State(False)
+
+        # ---------------------------------------------------------------------
+        # File Browser Modal
+        # ---------------------------------------------------------------------
+        with gr.Row(visible=False) as browse_modal:
+            file_browser = gr.FileExplorer(
+                label="Select Dataset Directory",
+                file_count="single",
+                root_dir=os.path.expanduser("~"),
+            )
+
+        browse_visible = gr.State(False)
+
+        def toggle_browse(visible):
+            return not visible, gr.Row(visible=not visible)
+
+        browse_btn.click(
+            fn=toggle_browse,
+            inputs=[browse_visible],
+            outputs=[browse_visible, browse_modal],
+        )
+
+        def select_from_browser(selected, visible):
+            if selected:
+                # Get directory path
+                path = str(selected)
+                if os.path.isfile(path):
+                    path = os.path.dirname(path)
+                return path, False, gr.Row(visible=False)
+            return gr.update(), visible, gr.update()
+
+        file_browser.change(
+            fn=select_from_browser,
+            inputs=[file_browser, browse_visible],
+            outputs=[dataset_path, browse_visible, browse_modal],
+        )
 
         # ---------------------------------------------------------------------
         # Event Bindings
@@ -702,16 +909,18 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             fn=load_episode,
             inputs=[episode_dropdown],
             outputs=[
-                cam1_image, cam2_image,
+                cam1_img, cam2_img,
+                combined_plot,
                 timeline_slider, timeline_slider,
-                joint_plots, frame_info, task_display,
+                frame_info, task_display,
             ],
         )
 
         timeline_slider.change(
             fn=update_frame,
             inputs=[timeline_slider],
-            outputs=[cam1_image, cam2_image, joint_plots, frame_info],
+            outputs=[cam1_img, cam2_img, combined_plot, frame_info],
+            show_progress="hidden",
         )
 
         # Navigation buttons
@@ -734,6 +943,47 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             fn=lambda x: step_frame(x, 10),
             inputs=[timeline_slider],
             outputs=[timeline_slider],
+        )
+
+        # Timer for playback - inactive by default, activated by play button
+        timer = gr.Timer(value=0.1, active=False)
+
+        # Play/Pause button - controls timer
+        play_btn.click(
+            fn=toggle_play,
+            inputs=[is_playing_state],
+            outputs=[is_playing_state, play_btn, timer],
+        )
+
+        # Timer tick - only runs when playing
+        timer.tick(
+            fn=advance_frame,
+            inputs=[timeline_slider, speed_slider],
+            outputs=[
+                cam1_img, cam2_img,
+                frame_info, timeline_slider,
+                timer,
+            ],
+            show_progress="hidden",
+        )
+
+        # Update button text and plot when play state changes (e.g., when reaching end)
+        def on_play_state_change(is_playing, current_frame):
+            btn_text = "⏸ Pause" if is_playing else "▶ Play"
+            logger.info(f"on_play_state_change: is_playing={is_playing}")
+
+            # When stopping, update plot to show current position
+            if not is_playing and state.episode_data is not None:
+                current_frame = int(current_frame) if current_frame is not None else 0
+                plot = generate_combined_plot(state.episode_data, current_frame=current_frame)
+                return gr.update(value=btn_text), plot, gr.Timer(active=False)
+
+            return gr.update(value=btn_text), gr.update(), gr.Timer(active=is_playing)
+
+        is_playing_state.change(
+            fn=on_play_state_change,
+            inputs=[is_playing_state, timeline_slider],
+            outputs=[play_btn, combined_plot, timer],
         )
 
     return app
