@@ -64,7 +64,7 @@ my question above for p3 is for Enable training regularization, after enable it,
 /home/jrobot/Pictures/local_visualizer.png
 /home/jrobot/Pictures/visualizer_whiten.png
 
-
+/home/jrobot/Pictures/visualizer_closer.png
 
 
   First run (15k steps):
@@ -95,3 +95,122 @@ RESUME_FROM=outputs/groot_1_6_augmented_20251219_174824/checkpoint-15000 \
   MAX_STEPS=45000 \
   SAVE_STEPS=3000 \
   bash custom/scripts/ver1_6/train_groot_so101_augmented.sh
+
+● Yes, this is an issue. I can see:
+
+  | Phase        | Learning Rate        |
+  |--------------|----------------------|
+  | End of 15k   | ~1e-12 (nearly zero) |
+  | After resume | ~7.5e-05 (jumped!)   |
+
+  What's happening:
+
+  When we resume with MAX_STEPS=45000, the trainer recalculates the LR schedule:
+  - Total steps = 45000
+  - Current step = 15000 (33% through)
+  - Cosine decay at 33% → LR ≈ 7.5e-05
+
+  So it's not restarting at 1e-4, but it's recalculating for the new total, which causes a jump from near-zero to 7.5e-05.
+
+  This explains the loss spike! Going from LR=1e-12 to LR=7.5e-05 is a huge jump.
+
+  Options to fix:
+
+  1. Lower peak LR for resume - Use LEARNING_RATE=1e-5 when resuming
+  2. Add small warmup on resume - Use WARMUP_RATIO=0.01 to smooth the transition
+  3. Accept it - The model is recovering and training is continuing (it may actually be beneficial since the first run's LR was too low to learn more)
+
+RESUME_FROM=... \
+  LEARNING_RATE=1e-5 \
+  WARMUP_RATIO=0.01 \
+  bash custom/scripts/ver1_6/train_groot_so101_augmented.sh
+
+python custom/scripts/ver1_6/eval_openloop_1_6.py \
+      --checkpoint outputs/groot_1_6_augmented_20251220_124942/checkpoint-45000 \
+      --num-trajectories 2 \
+      --output-dir eval_outputs/checkpoint_45000
+
+      python custom/scripts/ver1_6/eval_openloop_1_6.py \
+      --checkpoint outputs/groot_1_6_augmented_20251219_174824/checkpoint-27000 \
+      --num-trajectories 2 \
+      --output-dir eval_outputs/checkpoint_27000
+
+  RESUME_FROM=outputs/groot_1_6_augmented_20251219_174824/checkpoint-27000 \
+  MAX_STEPS=45000 \
+  SAVE_STEPS=3000 \
+  bash custom/scripts/ver1_6/train_groot_so101_augmented.sh
+
+MAX_STEPS=45000 SAVE_STEPS=1500 bash train_groot_so101_augmented.sh
+
+nohup bash -c 'MAX_STEPS=45000 SAVE_STEPS=1500 bash custom/scripts/ver1_6/train_groot_so101_augmented.sh' > training_45k.log 2>&1 &
+
+nohup bash -c 'MAX_STEPS=45000 SAVE_STEPS=1500 SAVE_TOTAL_LIMIT=15 bash custom/scripts/ver1_6/train_groot_so101_augmented.sh' > /home/jrobot/project/Isaac-GR00T/outputs/training_45k.log 2>&1 &
+
+
+python custom/scripts/ver1_6/infer_groot_so101_1_6.py \
+    --checkpoint outputs/groot_1_6_augmented_20251220_124942/checkpoint-45000 \
+    --task "pick up the blocks and place them on the plate" \
+    --duration 70
+
+
+potential issues:
+
+video format?
+
+  1. Video Backend Compatibility
+
+  | Backend        | AV1 Support | Notes                                        |
+  |----------------|-------------|----------------------------------------------|
+  | torchcodec     | ✅ Yes      | GR00T default (enforced in experiment.py:41) |
+  | torchvision_av | ✅ Yes      | Works, uses PyAV                             |
+  | decord         | ❌ No       | Will fail with AV1 codec error               |
+  | opencv         | ⚠️ Limited  | May have issues                              |
+
+  2. Training vs Evaluation Backend Mismatch
+
+  From your codebase (custom/jdocs/potential_issues_tutorial_comparison.md:118):
+  - Training: uses torchcodec (default)
+  - Your custom scripts often use torchvision_av
+
+  This mismatch could potentially cause slightly different frame retrieval for the same timestamp, but both support AV1 correctly.
+
+  3. Frame Retrieval Differences
+
+  Different backends use different logic:
+  - torchcodec: Maps timestamps with precision correction (video_utils.py:337-342)
+  - torchvision_av: Seeks to keyframe, iterates to target
+
+  Conclusion
+
+  No, the video format is NOT a concern for training performance. Your datasets:
+  1. Use AV1 codec - exactly what NVIDIA recommends
+  2. Match the SO-101 tuning guide specifications
+  3. Are correctly formatted for GR00T's torchcodec backend
+
+  The only potential issue is if you accidentally use decord backend (which doesn't support AV1), but the default torchcodec handles AV1 properly.
+
+python custom/tools/visualize_dataset_v2.py --dataset datasets/so101_pick_place_groot_augmented
+python custom/tools/visualize_dataset_v2.py --dataset demo_data/cube_to_bowl_5
+
+python custom/scripts/ver1_6/infer_groot_so101_1_6.py \
+  --checkpoint outputs/groot_1_6_augmented_20251220_124942/checkpoint-45000 \
+  --task "pick up the blocks and place them on the plate" \
+  --duration 70 \
+  --record
+
+new investigations:
+
+we did 45k steps training, didn;t see any improvement than 15k training: to me the training steps is not the concern for now, and further verified by groot's example's 1 epoch finetuning
+
+key symptoms:
+
+- misplace or swing or pick up in air issue
+  - gerate the traces for inference: [images, text joints] for investigation
+  - inference freq or timing mismatch issue 
+
+
+- timing for gripper
+  - assumptions:
+    - move too quickly when close to target?
+    - open gripper earlier and larger?
+
