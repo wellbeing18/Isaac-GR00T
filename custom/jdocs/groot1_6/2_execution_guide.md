@@ -243,8 +243,48 @@ GLOBAL_BATCH_SIZE=8 bash custom/scripts/ver1_6/train_groot_so101_1_6.sh
 | 1000  | ~1 hour      |
 | 5000  | ~3 hours     |
 | 10000 | ~6 hours     |
+| 45000 | ~15 hours    |
 
 **Checkpoints saved to:** `outputs/groot_1_6_so101/checkpoint-{step}/`
+
+### Running Training in Background (Survives Session Close)
+
+For long training runs, use `nohup` to keep training running after you close the terminal:
+
+```bash
+cd /home/jrobot/project/Isaac-GR00T
+source ~/anaconda3/etc/profile.d/conda.sh && conda activate groot
+
+# Run 45k training in background
+nohup bash -c 'MAX_STEPS=45000 SAVE_STEPS=1500 SAVE_TOTAL_LIMIT=15 bash custom/scripts/ver1_6/train_groot_so101_augmented.sh' > outputs/training_45k.log 2>&1 &
+
+# Save the process ID
+echo $!
+```
+
+**Monitoring:**
+```bash
+# Watch training progress
+tail -f outputs/training_45k.log
+
+# Or watch the formatted log inside output folder
+tail -f outputs/groot_1_6_augmented_*/training.log
+
+# Check GPU usage
+watch -n 1 nvidia-smi
+
+# Check if training is still running
+ps aux | grep train_groot
+
+# List saved checkpoints
+ls -la outputs/groot_1_6_augmented_*/checkpoint-*
+```
+
+**Logs location:**
+| Log | Location | Content |
+|-----|----------|---------|
+| nohup log | `outputs/training_45k.log` | All stdout/stderr |
+| training log | `outputs/groot_1_6_augmented_*/training.log` | Formatted with timestamps |
 
 **Troubleshooting:**
 - CUDA OOM: Reduce `GLOBAL_BATCH_SIZE` to 8 or 4
