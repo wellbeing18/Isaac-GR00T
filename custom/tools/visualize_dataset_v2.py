@@ -90,6 +90,30 @@ class EpisodeData:
     states: np.ndarray
 
 
+def video_key_to_label(video_key: str) -> str:
+    """Convert a video key to a friendly display label.
+
+    Examples:
+        "observation.images.head" -> "Head Camera"
+        "observation.images.left_wrist" -> "Left Wrist Camera"
+        "head" -> "Head Camera"
+        "wrist" -> "Wrist Camera"
+    """
+    # Remove common prefixes
+    key = video_key
+    if key.startswith("observation.images."):
+        key = key[len("observation.images."):]
+
+    # Convert underscores to spaces and title case
+    label = key.replace("_", " ").title()
+
+    # Add "Camera" suffix if not already present
+    if not label.lower().endswith("camera"):
+        label = f"{label} Camera"
+
+    return label
+
+
 # =============================================================================
 # Dataset Loading - v2 and v3 format support
 # =============================================================================
@@ -586,7 +610,8 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
         """Load episode data and first frame."""
         if state.metadata is None or episode_index is None:
             state.max_frame = 0
-            return (None, None, None, 0, gr.Slider(maximum=1), "No episode", "")
+            return (None, None, None, 0, gr.Slider(maximum=1), "No episode", "",
+                    gr.update(label="Camera 1"), gr.update(label="Camera 2"))
 
         try:
             # Load data
@@ -611,6 +636,11 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             frame_info = f"Frame 0/{state.max_frame}"
             task_info = state.episode_data.task
 
+            # Generate dynamic camera labels based on actual video keys
+            video_keys = list(state.video_frames.keys())
+            cam1_label = video_key_to_label(video_keys[0]) if len(video_keys) >= 1 else "Camera 1"
+            cam2_label = video_key_to_label(video_keys[1]) if len(video_keys) >= 2 else "Camera 2"
+
             return (
                 cam1_frame,
                 cam2_frame,
@@ -619,12 +649,15 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
                 gr.Slider(value=0, maximum=state.max_frame),
                 frame_info,
                 task_info,
+                gr.update(label=cam1_label),
+                gr.update(label=cam2_label),
             )
         except Exception as e:
             import traceback
             traceback.print_exc()
             state.max_frame = 0
-            return (None, None, None, 0, gr.Slider(maximum=1), f"Error: {e}", "")
+            return (None, None, None, 0, gr.Slider(maximum=1), f"Error: {e}", "",
+                    gr.update(label="Camera 1"), gr.update(label="Camera 2"))
 
     def update_frame(frame_idx: int) -> Tuple:
         """Update display for current frame."""
@@ -803,16 +836,17 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             with gr.Column(scale=3):
 
                 # Camera views side by side - close together in center
+                # Labels are updated dynamically based on actual video keys when episode loads
                 with gr.Row():
                     gr.Column(scale=1)  # Left spacer
                     cam1_img = gr.Image(
-                        label="Head Camera",
+                        label="Camera 1",
                         show_label=True,
                         height=280,
                         width=450,
                     )
                     cam2_img = gr.Image(
-                        label="Wrist Camera",
+                        label="Camera 2",
                         show_label=True,
                         height=280,
                         width=450,
@@ -913,6 +947,7 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
                 combined_plot,
                 timeline_slider, timeline_slider,
                 frame_info, task_display,
+                cam1_img, cam2_img,  # For label updates
             ],
         )
 
