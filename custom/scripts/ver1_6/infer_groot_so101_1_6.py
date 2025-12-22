@@ -62,7 +62,7 @@ MODALITY_CONFIG_PATH = "custom/scripts/ver1_6/so101_config_1_6.py"
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 # Inference Settings
-ACTION_HORIZON = 16       # Actions per inference (must match training)
+ACTION_HORIZON = 8        # Reduced from 16 to reduce image staleness (NVIDIA recommended)
 ACTION_INTERVAL = 0.033   # 30Hz execution rate (1/30 seconds)
 NUM_DENOISING_STEPS = 4   # DiT denoising iterations (NVIDIA default)
 
@@ -388,11 +388,12 @@ def run_inference_loop(
             inf_time = time.time() - inf_start
             inference_times.append(inf_time)
 
-            # Extract action buffer (horizon x dim for each joint group)
+            # Extract action buffer and slice to ACTION_HORIZON
             # Concatenate arm and gripper actions
             arm_actions = action_dict["single_arm"][0]  # (horizon, arm_dim)
             gripper_actions = action_dict["gripper"][0]  # (horizon, gripper_dim)
-            action_buffer = np.concatenate([arm_actions, gripper_actions], axis=1)
+            full_buffer = np.concatenate([arm_actions, gripper_actions], axis=1)
+            action_buffer = full_buffer[:ACTION_HORIZON]  # Actually use the horizon setting!
             action_idx = 0
 
             # Log detailed info every 80 steps (every ~16 inferences)
@@ -516,7 +517,17 @@ def main():
         default=HARDWARE_CONFIG,
         help=f"Hardware config path (default: {HARDWARE_CONFIG})"
     )
+    parser.add_argument(
+        "--action-horizon",
+        type=int,
+        default=ACTION_HORIZON,
+        help=f"Number of actions to execute before re-inference (default: {ACTION_HORIZON})"
+    )
     args = parser.parse_args()
+
+    # Override global ACTION_HORIZON with command-line argument
+    global ACTION_HORIZON
+    ACTION_HORIZON = args.action_horizon
 
     # Set up logging with timestamped log file
     global logger
@@ -531,12 +542,13 @@ def main():
     logger.info("=" * 70)
     logger.info("GR00T 1.6 Robot Inference")
     logger.info("=" * 70)
-    logger.info(f"Checkpoint: {args.checkpoint}")
-    logger.info(f"Task:       {args.task}")
-    logger.info(f"Duration:   {args.duration}s")
-    logger.info(f"Device:     {DEVICE}")
-    logger.info(f"Dry run:    {args.dry_run}")
-    logger.info(f"Log file:   {log_file}")
+    logger.info(f"Checkpoint:      {args.checkpoint}")
+    logger.info(f"Task:            {args.task}")
+    logger.info(f"Duration:        {args.duration}s")
+    logger.info(f"Action Horizon:  {ACTION_HORIZON} (re-inference every {ACTION_HORIZON} steps)")
+    logger.info(f"Device:          {DEVICE}")
+    logger.info(f"Dry run:         {args.dry_run}")
+    logger.info(f"Log file:        {log_file}")
     logger.info("=" * 70)
 
     # Validate checkpoint

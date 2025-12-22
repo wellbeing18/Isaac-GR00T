@@ -50,7 +50,7 @@ DEFAULT_CHECKPOINT = "outputs/groot_1_6_so101/checkpoint-10000"
 MODALITY_CONFIG_PATH = "custom/scripts/ver1_6/so101_config_1_6.py"
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-ACTION_HORIZON = 16
+ACTION_HORIZON = 8  # Changed from 16 to reduce image staleness (NVIDIA recommended)
 ACTION_INTERVAL = 0.033  # 30Hz
 NUM_DENOISING_STEPS = 4
 
@@ -367,10 +367,11 @@ def run_inference_loop_with_trace(
             action_dict, info = policy.get_action(observation)
             trace_entry.t_inference_end = time.perf_counter() - trace_start
 
-            # Extract action buffer
+            # Extract action buffer and slice to ACTION_HORIZON
             arm_actions = action_dict["single_arm"][0]
             gripper_actions = action_dict["gripper"][0]
-            action_buffer = np.concatenate([arm_actions, gripper_actions], axis=1)
+            full_buffer = np.concatenate([arm_actions, gripper_actions], axis=1)
+            action_buffer = full_buffer[:ACTION_HORIZON]  # Actually use the horizon setting!
             action_idx = 0
 
             # Store full action buffer in trace
@@ -403,19 +404,20 @@ def run_inference_loop_with_trace(
             # Always log inference details for diagnosis
             state_str = ", ".join([f"{x:6.1f}" for x in state])
             action0 = action_buffer[0]
-            action15 = action_buffer[15]
+            action_last = action_buffer[-1]
             action0_str = ", ".join([f"{x:6.1f}" for x in action0])
-            action15_str = ", ".join([f"{x:6.1f}" for x in action15])
-            trajectory = action_buffer[15] - action_buffer[0]
+            action_last_str = ", ".join([f"{x:6.1f}" for x in action_last])
+            trajectory = action_buffer[-1] - action_buffer[0]
             traj_str = ", ".join([f"{x:+6.1f}" for x in trajectory])
+            horizon_len = len(action_buffer)
 
             logger.info(f"")
-            logger.info(f"[INF {step_count:4d}] t={trace_entry.t_inference_end:.2f}s, inf={trace_entry.inference_duration_ms:.0f}ms")
+            logger.info(f"[INF {step_count:4d}] t={trace_entry.t_inference_end:.2f}s, inf={trace_entry.inference_duration_ms:.0f}ms, horizon={horizon_len}")
             logger.info(f"  State now:   [{state_str}]")
             logger.info(f"  Action[0]:   [{action0_str}]  (delta: {np.round(action0 - state, 1).tolist()})")
-            logger.info(f"  Action[15]:  [{action15_str}]")
-            logger.info(f"  Trajectory:  [{traj_str}]  (16-step motion)")
-            logger.info(f"  Gripper:     {state[5]:.1f} -> {action0[5]:.1f} -> {action15[5]:.1f}")
+            logger.info(f"  Action[{horizon_len-1}]:  [{action_last_str}]")
+            logger.info(f"  Trajectory:  [{traj_str}]  ({horizon_len}-step motion)")
+            logger.info(f"  Gripper:     {state[5]:.1f} -> {action0[5]:.1f} -> {action_last[5]:.1f}")
 
             # Warn if falling behind
             if trace_entry.inference_duration_ms > 100:
@@ -578,7 +580,17 @@ def main():
         default=HARDWARE_CONFIG,
         help=f"Hardware config path (default: {HARDWARE_CONFIG})"
     )
+    parser.add_argument(
+        "--action-horizon",
+        type=int,
+        default=ACTION_HORIZON,
+        help=f"Number of actions to execute before re-inference (default: {ACTION_HORIZON})"
+    )
     args = parser.parse_args()
+
+    # Override global ACTION_HORIZON with command-line argument
+    global ACTION_HORIZON
+    ACTION_HORIZON = args.action_horizon
 
     # Create trace directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -596,12 +608,13 @@ def main():
     logger.info("=" * 70)
     logger.info("GR00T 1.6 Robot Inference with Tracing")
     logger.info("=" * 70)
-    logger.info(f"Checkpoint: {args.checkpoint}")
-    logger.info(f"Task:       {args.task}")
-    logger.info(f"Duration:   {args.duration}s")
-    logger.info(f"Device:     {DEVICE}")
-    logger.info(f"Dry run:    {args.dry_run}")
-    logger.info(f"Trace dir:  {trace_dir}")
+    logger.info(f"Checkpoint:      {args.checkpoint}")
+    logger.info(f"Task:            {args.task}")
+    logger.info(f"Duration:        {args.duration}s")
+    logger.info(f"Action Horizon:  {ACTION_HORIZON} (re-inference every {ACTION_HORIZON} steps)")
+    logger.info(f"Device:          {DEVICE}")
+    logger.info(f"Dry run:         {args.dry_run}")
+    logger.info(f"Trace dir:       {trace_dir}")
     logger.info("=" * 70)
 
     # Save config
