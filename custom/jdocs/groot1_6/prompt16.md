@@ -6,5 +6,5 @@ python custom/scripts/ver1_6/infer_groot_so101_trace.py \
 
 # 2. Analyze traces
 python custom/scripts/ver1_6/analyze_inference_trace.py \
-    --trace-dir outputs/inference_traces/trace_20251221_192557 \
+    --trace-dir outputs/inference_traces/trace_20251221_215113 \
     --show-plots

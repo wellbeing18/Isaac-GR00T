@@ -338,6 +338,7 @@ def run_inference_loop(
     max_duration: float = 60.0,
     action_interval: float = 0.033,
     record_images: bool = False,
+    action_horizon: int = 8,
 ):
     """Main inference loop."""
     global running
@@ -388,12 +389,12 @@ def run_inference_loop(
             inf_time = time.time() - inf_start
             inference_times.append(inf_time)
 
-            # Extract action buffer and slice to ACTION_HORIZON
+            # Extract action buffer and slice to action_horizon
             # Concatenate arm and gripper actions
             arm_actions = action_dict["single_arm"][0]  # (horizon, arm_dim)
             gripper_actions = action_dict["gripper"][0]  # (horizon, gripper_dim)
             full_buffer = np.concatenate([arm_actions, gripper_actions], axis=1)
-            action_buffer = full_buffer[:ACTION_HORIZON]  # Actually use the horizon setting!
+            action_buffer = full_buffer[:action_horizon]  # Actually use the horizon setting!
             action_idx = 0
 
             # Log detailed info every 80 steps (every ~16 inferences)
@@ -525,9 +526,8 @@ def main():
     )
     args = parser.parse_args()
 
-    # Override global ACTION_HORIZON with command-line argument
-    global ACTION_HORIZON
-    ACTION_HORIZON = args.action_horizon
+    # Use the command-line argument value
+    action_horizon = args.action_horizon
 
     # Set up logging with timestamped log file
     global logger
@@ -545,7 +545,7 @@ def main():
     logger.info(f"Checkpoint:      {args.checkpoint}")
     logger.info(f"Task:            {args.task}")
     logger.info(f"Duration:        {args.duration}s")
-    logger.info(f"Action Horizon:  {ACTION_HORIZON} (re-inference every {ACTION_HORIZON} steps)")
+    logger.info(f"Action Horizon:  {action_horizon} (re-inference every {action_horizon} steps)")
     logger.info(f"Device:          {DEVICE}")
     logger.info(f"Dry run:         {args.dry_run}")
     logger.info(f"Log file:        {log_file}")
@@ -597,6 +597,7 @@ def main():
             max_duration=args.duration,
             action_interval=ACTION_INTERVAL,
             record_images=args.record,
+            action_horizon=action_horizon,
         )
 
     except KeyboardInterrupt:

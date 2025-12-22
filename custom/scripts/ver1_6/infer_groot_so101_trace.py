@@ -297,6 +297,7 @@ def run_inference_loop_with_trace(
     trace_dir: Path,
     max_duration: float = 60.0,
     action_interval: float = 0.033,
+    action_horizon: int = 8,
 ):
     """Main inference loop with comprehensive tracing."""
     global running
@@ -367,11 +368,11 @@ def run_inference_loop_with_trace(
             action_dict, info = policy.get_action(observation)
             trace_entry.t_inference_end = time.perf_counter() - trace_start
 
-            # Extract action buffer and slice to ACTION_HORIZON
+            # Extract action buffer and slice to action_horizon
             arm_actions = action_dict["single_arm"][0]
             gripper_actions = action_dict["gripper"][0]
             full_buffer = np.concatenate([arm_actions, gripper_actions], axis=1)
-            action_buffer = full_buffer[:ACTION_HORIZON]  # Actually use the horizon setting!
+            action_buffer = full_buffer[:action_horizon]  # Actually use the horizon setting!
             action_idx = 0
 
             # Store full action buffer in trace
@@ -588,9 +589,8 @@ def main():
     )
     args = parser.parse_args()
 
-    # Override global ACTION_HORIZON with command-line argument
-    global ACTION_HORIZON
-    ACTION_HORIZON = args.action_horizon
+    # Use the command-line argument value (stored locally since we can't use global after reference)
+    action_horizon = args.action_horizon
 
     # Create trace directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -611,7 +611,7 @@ def main():
     logger.info(f"Checkpoint:      {args.checkpoint}")
     logger.info(f"Task:            {args.task}")
     logger.info(f"Duration:        {args.duration}s")
-    logger.info(f"Action Horizon:  {ACTION_HORIZON} (re-inference every {ACTION_HORIZON} steps)")
+    logger.info(f"Action Horizon:  {action_horizon} (re-inference every {action_horizon} steps)")
     logger.info(f"Device:          {DEVICE}")
     logger.info(f"Dry run:         {args.dry_run}")
     logger.info(f"Trace dir:       {trace_dir}")
@@ -625,7 +625,7 @@ def main():
         "dry_run": args.dry_run,
         "hw_config": args.hw_config,
         "device": DEVICE,
-        "action_horizon": ACTION_HORIZON,
+        "action_horizon": action_horizon,
         "action_interval": ACTION_INTERVAL,
         "timestamp": timestamp,
     }
@@ -676,6 +676,7 @@ def main():
             trace_dir=trace_dir,
             max_duration=args.duration,
             action_interval=ACTION_INTERVAL,
+            action_horizon=action_horizon,
         )
 
     except KeyboardInterrupt:

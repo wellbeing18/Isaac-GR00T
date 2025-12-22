@@ -214,7 +214,7 @@ python custom/scripts/ver1_6/infer_groot_so101_trace.py \
 
 # 2. Analyze traces
 python custom/scripts/ver1_6/analyze_inference_trace.py \
-    --trace-dir outputs/inference_traces/trace_20251221_163204 \
+    --trace-dir outputs/inference_traces/trace_20251221_214617 \
     --show-plots
 
 
@@ -323,3 +323,140 @@ scripts/deployment/standalone_inference_script.py, scripts/deployment/GR00T_infe
   --dataset.episode_time_s=30
   --dataset.reset_time_s=10, as in https://huggingface.co/docs/lerobot/groot 
   
+
+Fix 1: Add Recovery Demonstrations to Training Data
+
+  What you need to record:
+
+  Record new demonstrations where you deliberately start with the arm away from the blocks, then move it toward them:
+
+  New Episode Type:
+  1. Move arm far to the left (ShPan = -60° or more)
+  2. Wrist camera sees empty table
+  3. Head camera shows blocks clearly
+  4. YOU demonstrate: move arm back toward blocks (ShPan → 0°)
+  5. Continue with normal pick and place
+
+  Concrete steps:
+
+  1. Before recording, manually move the arm to various "wrong" positions:
+    - Far left (ShPan = -60°)
+    - Far right (ShPan = +60°)
+    - Too high, too low
+  2. Record yourself moving it back to the blocks and completing the task
+  3. Mix these "recovery" episodes into your training dataset (maybe 20-30% of episodes)
+
+  Example script modification for recording:
+  # In your recording script, add starting positions:
+  RECOVERY_START_POSITIONS = [
+      [-60, 50, -50, 80, -90, 30],  # Far left
+      [60, 50, -50, 80, -90, 30],   # Far right  
+      [0, 20, -30, 60, -60, 30],    # Too high
+  ]
+
+  # Randomly start some episodes from these positions
+  if random.random() < 0.3:  # 30% of episodes
+      start_pos = random.choice(RECOVERY_START_POSITIONS)
+      robot.move_to(start_pos)
+      print("Starting from recovery position - demonstrate moving back to blocks")
+
+  ---
+  Fix 2: Data Augmentation (No New Recording Needed)
+
+  Instead of recording new data, augment existing trajectories by starting from middle states:
+
+  The idea:
+  Original trajectory:
+    State 0 → State 1 → State 2 → ... → State 100 (done)
+
+  Augmented trajectories (created automatically):
+    State 30 → State 31 → ... → State 100 (start from middle)
+    State 50 → State 51 → ... → State 100 (start from different point)
+    State 70 → State 71 → ... → State 100 (start near end)
+
+  This teaches the model: "If you find yourself in State 50, here's what to do next."
+
+  Concrete implementation:
+
+  # Add to your data loading/preprocessing
+
+  def augment_trajectory_with_random_starts(trajectory, num_augmented=3):
+      """
+      Create additional training samples by starting from random points in trajectory.
+      
+      This teaches the model recovery behavior - what to do if it's already
+      partway through a task.
+      """
+      augmented = [trajectory]  # Keep original
+
+      traj_len = len(trajectory)
+      for _ in range(num_augmented):
+          # Pick random start point (not too close to end)
+          start_idx = random.randint(0, int(traj_len * 0.7))
+
+          # Create sub-trajectory from this point
+          sub_traj = trajectory[start_idx:]
+
+          if len(sub_traj) >= 10:  # Only keep if long enough
+              augmented.append(sub_traj)
+
+      return augmented
+
+  ---
+  Why These Fixes Work
+
+  The problem is distribution mismatch:
+
+  | During Training                     | During Inference              |
+  |-------------------------------------|-------------------------------|
+  | Arm always starts near blocks       | Arm might drift far away      |
+  | Wrist always sees something         | Wrist might see empty table   |
+  | Head camera view = similar to wrist | Head camera view ≠ wrist view |
+
+  Both fixes expand the training distribution to include "recovery" states, so the model learns:
+  - "When wrist sees nothing but head sees blocks on the right → move right"
+  - "When I'm far from blocks → navigate back using head camera"
+
+  ---
+  Which Fix Should You Try First?
+
+  1. Fix 2 (Data Augmentation) - Try this first
+    - No new recording needed
+    - Just modify your data loading
+    - Can test quickly
+  2. Fix 1 (Recovery Demonstrations) - If Fix 2 isn't enough
+    - Record 10-20 new episodes starting from "lost" positions
+    - More effort but more direct training signal
+
+  Would you like me to write the actual data augmentation code for your training pipeline?
+
+
+now we are encountering bad inference performance for our latest finetuned groot 1.6 model: outputs/groot_1_6_augmented_20251220_124942/checkpoint-45000, using dataset datasets/so101_pick_place_groot_augmented. I did open loop eval and it looks good to me: eval_outputs/checkpoint_45000, but when we do inference, the performance is bad: cannot finish to pick up any blocks(though it looks trying to approach the blocks and did some trial and error), but it shows some bad behaviors to me: 1) gripper timing is not right(which I think the reason could in dataset which we think we know how to fix) 2) arm aimed for a block but ended with a wrong place next to the block which failed the task 3) the arm sometimes move away from blocks and never recover, or the arm is trying to grip blocks in the air or places there is no blocks.
+
+in order to investigate and diagnose to find the root cause, we created scripts: custom/scripts/ver1_6/infer_groot_so101_trace.py and custom/scripts/ver1_6/analyze_inference_trace.py, which help generate input/outputs(prediction) traces for investigation. and claude has generated its investigation in custom/jdocs/groot1_6/5_inference_mismatch_investigation.md, which doesn't quite convince me, I think there could be some other potential issues.
+
+some inference traces are:
+- swing to the far left where there is no block, and never return: outputs/inference_traces/trace_20251221_214617
+- grip in wrong places or in the air: outputs/inference_traces/trace_20251221_214755 and outputs/inference_traces/trace_20251221_215113.
+
+currently I think the possible issues are in training dataset(horizontally flipped augmented dataset: datasets/so101_pick_place_groot_augmented), or in our training script custom/scripts/ver1_6/train_groot_so101_augmented.sh(or its modality, stats, or cfg?), or in inference: script custom/scripts/ver1_6/infer_groot_so101_1_6.py or custom/scripts/ver1_6/infer_groot_so101_trace.py. so you could to search and research to help us find the root cause.
+
+for inference, you can also reference groot or lerobot(for groot) inference scripts below: 
+scripts/deployment/standalone_inference_script.py, scripts/deployment/GR00T_inference_timing.ipynb, scripts/deployment/*, getting_started/GR00T_inference.ipynb, or lerobot(groot)'s inference method: lerobot-record \
+  --robot.type=bi_so100_follower \
+  --robot.left_arm_port=/dev/ttyACM1 \
+  --robot.right_arm_port=/dev/ttyACM0 \
+  --robot.id=bimanual_follower \
+  --robot.cameras='{ right: {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30},
+    left: {"type": "opencv", "index_or_path": 2, "width": 640, "height": 480, "fps": 30},
+    top: {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "fps": 30},
+  }' \
+  --display_data=true \
+  --dataset.repo_id=<user>/eval_groot-bimanual  \
+  --dataset.num_episodes=10 \
+  --dataset.single_task="Grab and handover the red cube to the other arm"
+  --policy.path=<user>/groot-bimanual # your trained model
+  --dataset.episode_time_s=30
+  --dataset.reset_time_s=10, as in https://huggingface.co/docs/lerobot/groot 
+
+you don't make any changes, but write your investigation report to: custom/jdocs/groot1_6/7_gemini__inference_mismatch_investigation.md
