@@ -151,3 +151,4 @@ Before digging deeper into augmentation correctness or subtle modality/stats mis
 > **Your system is still effectively running 16-step open-loop chunks between perception updates**, producing large observation staleness and enabling OOD drift. The “horizon reduction” knob appears not to be operational in the real execution loop.
 
 
+

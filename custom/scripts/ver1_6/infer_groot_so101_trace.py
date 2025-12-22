@@ -50,7 +50,7 @@ DEFAULT_CHECKPOINT = "outputs/groot_1_6_so101/checkpoint-10000"
 MODALITY_CONFIG_PATH = "custom/scripts/ver1_6/so101_config_1_6.py"
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-ACTION_HORIZON = 8  # Changed from 16 to reduce image staleness (NVIDIA recommended)
+ACTION_HORIZON = 4  # Changed from 16 to reduce image staleness (NVIDIA recommended)
 ACTION_INTERVAL = 0.033  # 30Hz
 NUM_DENOISING_STEPS = 4
 
