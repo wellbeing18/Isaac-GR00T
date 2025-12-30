@@ -22,3 +22,7 @@ python custom/scripts/ver1_6/infer_groot_so101_trace.py \
 python custom/scripts/ver1_6/analyze_inference_trace.py \
     --trace-dir outputs/inference_traces/trace_20251222_113045 \
     --show-plots
+
+python custom/scripts/ver1_6/analyze_inference_trace.py \
+    --trace-dir outputs/inference_traces/trace_20251222_115129 \
+    --show-plots

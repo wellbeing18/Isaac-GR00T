@@ -460,3 +460,25 @@ scripts/deployment/standalone_inference_script.py, scripts/deployment/GR00T_infe
   --dataset.reset_time_s=10, as in https://huggingface.co/docs/lerobot/groot 
 
 you don't make any changes, but write your investigation report to: custom/jdocs/groot1_6/7_gemini__inference_mismatch_investigation.md
+
+
+I ran 2 inference with changed action horizon as in outputs/inference_traces/trace_20251222_113045 and outputs/inference_traces/trace_20251222_115129. you need to do your analysis by analyzing the traces
+  following the inputs infere output loop to reason and think why it behaviors like this, the key symptom I saw: 1) for trace_20251222_113045, after pickup and placed the first cube, it sitting back while there are
+  a lot of other cubes, for trace_20251222_115129 it behaves really bad without purposely doing anything. though we have to admit that after adjust action horizon, we did see the great improvement of success
+  ratio(at least 50% inference can pick up a cube), that is logically making sense as with shorter action horizon, the accuracy of trajectory toward finish job is much better. but we still find there are
+  unexplainable behaviors some as I mentioned above, which to me is more like the model is blind to the scene(there are multiple blocks left but it went back) or it does nothing because blocks are all to the right
+  side of its wrist camera, which further raise the suspect to me, in each inference cycle, head camera view doesn't play any effect, it is still the wrist camera acts as the major visual inputs, though this is the
+  assumption, but to me only with this assumption we can explain those strange symptoms we saw. again this is my assumption, you should always based on traces facts to do your investigation. again don't make any changes, write your research result to custom/jdocs/groot1_6/9_gpt_inference_mismatch_investigation.md
+
+
+  inference:
+  - accelerate inference: torch.compile
+  - client server
+  - head camera
+    - modality 
+  - dagger, RTC?
+  - simulation?
+  - relative position?
+  - visual embedding?
+
+/home/jrobot/Pictures/flipped_camera.png
