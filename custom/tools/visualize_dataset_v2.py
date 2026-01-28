@@ -77,6 +77,8 @@ class DatasetMetadata:
     data_path_template: str
     episodes: List[Dict]
     tasks: List[str]
+    # v3-specific: detailed episode metadata with file indices and video timestamps
+    episodes_v3_meta: Dict[int, Dict] = None  # episode_index -> metadata dict
 
 
 @dataclass
@@ -118,6 +120,45 @@ def video_key_to_label(video_key: str) -> str:
 # Dataset Loading - v2 and v3 format support
 # =============================================================================
 
+def load_v3_episodes_metadata(dataset_path: str) -> Dict[int, Dict]:
+    """Load v3 episode metadata from parquet files in meta/episodes/.
+
+    Returns a dict mapping episode_index to metadata including:
+    - data/chunk_index, data/file_index: which parquet file contains the data
+    - videos/{key}/chunk_index, file_index, from_timestamp, to_timestamp: video info
+    - length: number of frames in episode
+    - tasks: task description
+    """
+    path = Path(dataset_path)
+    episodes_dir = path / "meta" / "episodes"
+
+    if not episodes_dir.exists():
+        logger.warning(f"v3 episodes metadata dir not found: {episodes_dir}")
+        return {}
+
+    episodes_meta = {}
+
+    # Iterate through chunk directories
+    for chunk_dir in sorted(episodes_dir.iterdir()):
+        if not chunk_dir.is_dir():
+            continue
+
+        # Load each parquet file in the chunk
+        for parquet_file in sorted(chunk_dir.glob("*.parquet")):
+            try:
+                df = pq.read_table(parquet_file).to_pandas()
+
+                for _, row in df.iterrows():
+                    ep_idx = int(row["episode_index"])
+                    episodes_meta[ep_idx] = row.to_dict()
+
+            except Exception as e:
+                logger.warning(f"Failed to load v3 episode metadata from {parquet_file}: {e}")
+
+    logger.info(f"Loaded v3 metadata for {len(episodes_meta)} episodes")
+    return episodes_meta
+
+
 def detect_format_version(dataset_path: str) -> str:
     """Auto-detect dataset format version."""
     path = Path(dataset_path)
@@ -148,6 +189,8 @@ def load_dataset_metadata(dataset_path: str, format_version: str = "auto") -> Da
     if format_version == "auto":
         format_version = detect_format_version(dataset_path)
 
+    logger.info(f"Loading dataset from {dataset_path} (format: {format_version})")
+
     # Load info.json
     with open(meta_path / "info.json", "r") as f:
         info = json.load(f)
@@ -162,15 +205,43 @@ def load_dataset_metadata(dataset_path: str, format_version: str = "auto") -> Da
                     task_data = json.loads(line.strip())
                     tasks.append(task_data.get("task", ""))
 
-    # Load episodes.jsonl
+    # Load episodes - different for v2 vs v3
     episodes = []
-    episodes_file = meta_path / "episodes.jsonl"
-    if episodes_file.exists():
-        with open(episodes_file, "r") as f:
-            for line in f:
-                if line.strip():
-                    ep_data = json.loads(line.strip())
-                    episodes.append(ep_data)
+    episodes_v3_meta = None
+
+    if format_version == "v3":
+        # v3: load detailed metadata from parquet files
+        episodes_v3_meta = load_v3_episodes_metadata(dataset_path)
+
+        # Build episodes list from v3 metadata
+        for ep_idx in sorted(episodes_v3_meta.keys()):
+            ep_meta = episodes_v3_meta[ep_idx]
+            task_list = ep_meta.get("tasks", [])
+            task_str = task_list[0] if isinstance(task_list, list) and len(task_list) > 0 else str(task_list)
+            episodes.append({
+                "episode_index": ep_idx,
+                "task_index": 0,  # v3 stores task directly
+                "task": task_str,
+                "length": ep_meta.get("length", 0),
+            })
+
+        # Update tasks list from v3 metadata if needed
+        if not tasks:
+            seen_tasks = set()
+            for ep in episodes:
+                task = ep.get("task", "")
+                if task and task not in seen_tasks:
+                    tasks.append(task)
+                    seen_tasks.add(task)
+    else:
+        # v2: load from episodes.jsonl
+        episodes_file = meta_path / "episodes.jsonl"
+        if episodes_file.exists():
+            with open(episodes_file, "r") as f:
+                for line in f:
+                    if line.strip():
+                        ep_data = json.loads(line.strip())
+                        episodes.append(ep_data)
 
     # Extract joint names
     joint_names = []
@@ -188,27 +259,9 @@ def load_dataset_metadata(dataset_path: str, format_version: str = "auto") -> Da
         if key.startswith("observation.images."):
             video_keys.append(key)
 
-    # Get path templates
-    if format_version == "v2":
-        # v2 format: videos/chunk-{chunk}/{video_key}/episode_{index}.mp4
-        video_path_template = info.get(
-            "video_path",
-            "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
-        )
-        data_path_template = info.get(
-            "data_path",
-            "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
-        )
-    else:
-        # v3 format: videos/{video_key}/chunk-{chunk}/file-000.mp4 (concatenated)
-        video_path_template = info.get(
-            "video_path",
-            "videos/{video_key}/chunk-{episode_chunk:03d}/file-000.mp4"
-        )
-        data_path_template = info.get(
-            "data_path",
-            "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
-        )
+    # Get path templates (stored for reference, but v3 uses episode metadata for actual paths)
+    video_path_template = info.get("video_path", "")
+    data_path_template = info.get("data_path", "")
 
     return DatasetMetadata(
         dataset_path=dataset_path,
@@ -222,15 +275,16 @@ def load_dataset_metadata(dataset_path: str, format_version: str = "auto") -> Da
         data_path_template=data_path_template,
         episodes=episodes,
         tasks=tasks,
+        episodes_v3_meta=episodes_v3_meta,
     )
 
 
-def get_video_path(metadata: DatasetMetadata, episode_index: int, video_key: str) -> Path:
-    """Get the video file path for an episode and camera."""
+def get_video_path_v2(metadata: DatasetMetadata, episode_index: int, video_key: str) -> Path:
+    """Get the video file path for an episode and camera (v2 format)."""
     path = Path(metadata.dataset_path)
     chunk_id = episode_index // 1000
 
-    # Format the template
+    # Format the template with v2 variable names
     video_path = metadata.video_path_template.format(
         episode_chunk=chunk_id,
         video_key=video_key,
@@ -240,25 +294,66 @@ def get_video_path(metadata: DatasetMetadata, episode_index: int, video_key: str
     return path / video_path
 
 
+def get_video_path_v3(metadata: DatasetMetadata, episode_index: int, video_key: str) -> Tuple[Path, float, float]:
+    """Get the video file path and timestamp range for an episode (v3 format).
+
+    Returns:
+        Tuple of (video_path, from_timestamp, to_timestamp)
+    """
+    path = Path(metadata.dataset_path)
+
+    if metadata.episodes_v3_meta is None or episode_index not in metadata.episodes_v3_meta:
+        raise ValueError(f"No v3 metadata for episode {episode_index}")
+
+    ep_meta = metadata.episodes_v3_meta[episode_index]
+
+    # Get video-specific metadata
+    chunk_key = f"videos/{video_key}/chunk_index"
+    file_key = f"videos/{video_key}/file_index"
+    from_ts_key = f"videos/{video_key}/from_timestamp"
+    to_ts_key = f"videos/{video_key}/to_timestamp"
+
+    chunk_index = int(ep_meta.get(chunk_key, 0))
+    file_index = int(ep_meta.get(file_key, 0))
+    from_timestamp = float(ep_meta.get(from_ts_key, 0.0))
+    to_timestamp = float(ep_meta.get(to_ts_key, 0.0))
+
+    # Build path: videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4
+    video_path = path / "videos" / video_key / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.mp4"
+
+    return video_path, from_timestamp, to_timestamp
+
+
 def load_episode_data(metadata: DatasetMetadata, episode_index: int) -> EpisodeData:
     """Load action and state data for a specific episode."""
     path = Path(metadata.dataset_path)
-    chunk_id = episode_index // 1000
-
-    # Format parquet path
-    parquet_path = path / metadata.data_path_template.format(
-        episode_chunk=chunk_id,
-        episode_index=episode_index,
-    )
 
     if pq is None:
         raise ImportError("pyarrow is required for loading parquet files")
+
+    if metadata.format_version == "v3":
+        # v3: get file location from episode metadata
+        if metadata.episodes_v3_meta is None or episode_index not in metadata.episodes_v3_meta:
+            raise ValueError(f"No v3 metadata for episode {episode_index}")
+
+        ep_meta = metadata.episodes_v3_meta[episode_index]
+        chunk_index = int(ep_meta.get("data/chunk_index", 0))
+        file_index = int(ep_meta.get("data/file_index", 0))
+
+        parquet_path = path / "data" / f"chunk-{chunk_index:03d}" / f"file-{file_index:03d}.parquet"
+    else:
+        # v2: calculate path from episode index
+        chunk_id = episode_index // 1000
+        parquet_path = path / metadata.data_path_template.format(
+            episode_chunk=chunk_id,
+            episode_index=episode_index,
+        )
 
     # Read parquet
     table = pq.read_table(parquet_path)
     df = table.to_pandas()
 
-    # Filter by episode if needed
+    # Filter by episode
     if "episode_index" in df.columns:
         ep_col = df["episode_index"]
         if hasattr(ep_col.iloc[0], '__len__'):
@@ -283,9 +378,13 @@ def load_episode_data(metadata: DatasetMetadata, episode_index: int) -> EpisodeD
     task = ""
     for ep in metadata.episodes:
         if ep.get("episode_index") == episode_index:
-            task_idx = ep.get("task_index", 0)
-            if task_idx < len(metadata.tasks):
-                task = metadata.tasks[task_idx]
+            # v3 stores task directly, v2 uses task_index
+            if "task" in ep:
+                task = ep["task"]
+            else:
+                task_idx = ep.get("task_index", 0)
+                if task_idx < len(metadata.tasks):
+                    task = metadata.tasks[task_idx]
             break
 
     return EpisodeData(
@@ -393,6 +492,73 @@ def extract_all_frames(video_path: Path) -> Optional[np.ndarray]:
             cap.release()
 
             if frames:
+                return np.array(frames)
+        except Exception as e:
+            print(f"cv2 failed for {video_path}: {e}")
+
+    return None
+
+
+def extract_frames_by_timestamp(video_path: Path, from_timestamp: float, to_timestamp: float, fps: int = 30) -> Optional[np.ndarray]:
+    """Extract frames from a video file within a specific timestamp range (for v3 concatenated videos).
+
+    Args:
+        video_path: Path to the video file
+        from_timestamp: Start timestamp in seconds
+        to_timestamp: End timestamp in seconds
+        fps: Frames per second of the video
+
+    Returns:
+        numpy array of frames or None if extraction fails
+    """
+    if not video_path.exists():
+        print(f"Video file not found: {video_path}")
+        return None
+
+    start_frame = int(from_timestamp * fps)
+    end_frame = int(to_timestamp * fps)
+
+    logger.debug(f"Extracting frames {start_frame}-{end_frame} from {video_path} (timestamps {from_timestamp:.2f}-{to_timestamp:.2f}s)")
+
+    # Try av library first (handles AV1 codec)
+    if HAS_AV:
+        try:
+            container = av.open(str(video_path))
+            frames = []
+            frame_count = 0
+
+            for frame in container.decode(video=0):
+                if frame_count >= start_frame and frame_count < end_frame:
+                    frames.append(frame.to_ndarray(format="rgb24"))
+                elif frame_count >= end_frame:
+                    break
+                frame_count += 1
+
+            container.close()
+
+            if frames:
+                logger.debug(f"Extracted {len(frames)} frames using av")
+                return np.array(frames)
+        except Exception as e:
+            print(f"av failed for {video_path}: {e}")
+
+    # Fallback to OpenCV
+    if HAS_CV2:
+        try:
+            cap = cv2.VideoCapture(str(video_path))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            frames = []
+
+            for _ in range(end_frame - start_frame):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+            cap.release()
+
+            if frames:
+                logger.debug(f"Extracted {len(frames)} frames using cv2")
                 return np.array(frames)
         except Exception as e:
             print(f"cv2 failed for {video_path}: {e}")
@@ -584,8 +750,12 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             choices = []
             for ep in state.metadata.episodes:
                 idx = ep.get("episode_index", len(choices))
-                task_idx = ep.get("task_index", 0)
-                task = state.metadata.tasks[task_idx] if task_idx < len(state.metadata.tasks) else ""
+                # v3 stores task directly, v2 uses task_index
+                if "task" in ep:
+                    task = ep["task"]
+                else:
+                    task_idx = ep.get("task_index", 0)
+                    task = state.metadata.tasks[task_idx] if task_idx < len(state.metadata.tasks) else ""
                 label = f"Ep {idx}: {task[:30]}..." if len(task) > 30 else f"Ep {idx}: {task}" if task else f"Episode {idx}"
                 choices.append((label, idx))
 
@@ -610,8 +780,8 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
         """Load episode data and first frame."""
         if state.metadata is None or episode_index is None:
             state.max_frame = 0
-            return (None, None, None, 0, gr.Slider(maximum=1), "No episode", "",
-                    gr.update(label="Camera 1"), gr.update(label="Camera 2"))
+            return (None, None, None, None, 0, gr.Slider(maximum=1), "No episode", "",
+                    gr.update(label="Camera 1"), gr.update(label="Camera 2"), gr.update(label="Camera 3"))
 
         try:
             # Load data
@@ -622,13 +792,21 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             # Load video frames for each camera
             state.video_frames = {}
             for video_key in state.metadata.video_keys:
-                video_path = get_video_path(state.metadata, episode_index, video_key)
-                frames = extract_all_frames(video_path)
+                if state.metadata.format_version == "v3":
+                    # v3: get video path and timestamps, extract frames from time range
+                    video_path, from_ts, to_ts = get_video_path_v3(state.metadata, episode_index, video_key)
+                    frames = extract_frames_by_timestamp(video_path, from_ts, to_ts, state.metadata.fps)
+                else:
+                    # v2: simple per-episode video file
+                    video_path = get_video_path_v2(state.metadata, episode_index, video_key)
+                    frames = extract_all_frames(video_path)
+
                 if frames is not None:
                     state.video_frames[video_key] = frames
+                    logger.info(f"Loaded {len(frames)} frames for {video_key}")
 
             # Get first frames
-            cam1_frame, cam2_frame = get_frames_for_position(0)
+            cam1_frame, cam2_frame, cam3_frame = get_frames_for_position(0)
 
             # Generate combined plot
             combined_plot = generate_combined_plot(state.episode_data, current_frame=0)
@@ -640,10 +818,12 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             video_keys = list(state.video_frames.keys())
             cam1_label = video_key_to_label(video_keys[0]) if len(video_keys) >= 1 else "Camera 1"
             cam2_label = video_key_to_label(video_keys[1]) if len(video_keys) >= 2 else "Camera 2"
+            cam3_label = video_key_to_label(video_keys[2]) if len(video_keys) >= 3 else "Camera 3"
 
             return (
                 cam1_frame,
                 cam2_frame,
+                cam3_frame,
                 combined_plot,
                 0,
                 gr.Slider(value=0, maximum=state.max_frame),
@@ -651,31 +831,32 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
                 task_info,
                 gr.update(label=cam1_label),
                 gr.update(label=cam2_label),
+                gr.update(label=cam3_label),
             )
         except Exception as e:
             import traceback
             traceback.print_exc()
             state.max_frame = 0
-            return (None, None, None, 0, gr.Slider(maximum=1), f"Error: {e}", "",
-                    gr.update(label="Camera 1"), gr.update(label="Camera 2"))
+            return (None, None, None, None, 0, gr.Slider(maximum=1), f"Error: {e}", "",
+                    gr.update(label="Camera 1"), gr.update(label="Camera 2"), gr.update(label="Camera 3"))
 
     def update_frame(frame_idx: int) -> Tuple:
         """Update display for current frame."""
         if state.episode_data is None:
-            return (None, None, None, "No data")
+            return (None, None, None, None, "No data")
 
         frame_idx = int(frame_idx)
         state.current_frame = frame_idx
 
         # Get frames as numpy arrays
-        cam1_frame, cam2_frame = get_frames_for_position(frame_idx)
+        cam1_frame, cam2_frame, cam3_frame = get_frames_for_position(frame_idx)
 
         # Generate combined plot
         combined_plot = generate_combined_plot(state.episode_data, current_frame=frame_idx)
 
         frame_info = f"Frame {frame_idx}/{state.episode_data.length-1}"
 
-        return (cam1_frame, cam2_frame, combined_plot, frame_info)
+        return (cam1_frame, cam2_frame, cam3_frame, combined_plot, frame_info)
 
     def step_frame(current: int, delta: int) -> int:
         """Step frame by delta."""
@@ -691,10 +872,11 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
         logger.info(f"toggle_play: {is_playing} -> {new_state}")
         return new_state, gr.update(value=btn_text), gr.Timer(active=new_state)
 
-    def get_frames_for_position(frame_idx: int) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    def get_frames_for_position(frame_idx: int) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
         """Get camera frames for a given position as numpy arrays."""
         cam1_frame = None
         cam2_frame = None
+        cam3_frame = None
         video_keys = list(state.video_frames.keys())
 
         logger.debug(f"get_frames_for_position: frame_idx={frame_idx}, video_keys={video_keys}")
@@ -711,7 +893,13 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
                 cam2_frame = resize_frame(frames[frame_idx], max_width=400)
                 logger.debug(f"  cam2_frame: shape={cam2_frame.shape if cam2_frame is not None else None}, dtype={cam2_frame.dtype if cam2_frame is not None else None}")
 
-        return cam1_frame, cam2_frame
+        if len(video_keys) >= 3:
+            frames = state.video_frames[video_keys[2]]
+            if frame_idx < len(frames):
+                cam3_frame = resize_frame(frames[frame_idx], max_width=400)
+                logger.debug(f"  cam3_frame: shape={cam3_frame.shape if cam3_frame is not None else None}, dtype={cam3_frame.dtype if cam3_frame is not None else None}")
+
+        return cam1_frame, cam2_frame, cam3_frame
 
     def advance_frame(current_frame, speed) -> Tuple:
         """Advance frame during playback - only called when timer is active."""
@@ -730,7 +918,7 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
 
         if state.episode_data is None or state.max_frame == 0:
             logger.warning("advance_frame: No episode data, stopping timer")
-            return (gr.update(), gr.update(), gr.update(), 0, gr.Timer(active=False))
+            return (gr.update(), gr.update(), gr.update(), gr.update(), 0, gr.Timer(active=False))
 
         max_frame = state.max_frame
         current_frame = min(max(0, current_frame), max_frame)
@@ -740,11 +928,12 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
         if new_frame >= max_frame:
             new_frame = max_frame
             state.current_frame = new_frame
-            cam1_frame, cam2_frame = get_frames_for_position(new_frame)
+            cam1_frame, cam2_frame, cam3_frame = get_frames_for_position(new_frame)
             logger.info(f"Playback ended at frame {new_frame}")
             return (
                 cam1_frame,
                 cam2_frame,
+                cam3_frame,
                 f"Frame {new_frame}/{max_frame}",
                 int(new_frame),
                 gr.Timer(active=False),  # Stop timer
@@ -752,11 +941,12 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
 
         # Playing - update frames
         state.current_frame = new_frame
-        cam1_frame, cam2_frame = get_frames_for_position(new_frame)
+        cam1_frame, cam2_frame, cam3_frame = get_frames_for_position(new_frame)
 
         return (
             cam1_frame,
             cam2_frame,
+            cam3_frame,
             f"Frame {new_frame}/{max_frame}",
             int(new_frame),
             gr.update(),  # Keep timer running
@@ -773,11 +963,11 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
     # -------------------------------------------------------------------------
 
     with gr.Blocks(
-        title="LeRobot Dataset Visualizer",
+        title="Robot Dataset Visualizer",
         fill_height=True,
     ) as app:
 
-        gr.Markdown("## LeRobot Dataset Visualizer")
+        gr.Markdown("## Robot Dataset Visualizer")
 
         with gr.Row():
             # -----------------------------------------------------------------
@@ -835,23 +1025,27 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             # -----------------------------------------------------------------
             with gr.Column(scale=3):
 
-                # Camera views side by side - close together in center
+                # Camera views side by side - 3 cameras
                 # Labels are updated dynamically based on actual video keys when episode loads
                 with gr.Row():
-                    gr.Column(scale=1)  # Left spacer
                     cam1_img = gr.Image(
                         label="Camera 1",
                         show_label=True,
-                        height=280,
-                        width=450,
+                        height=240,
+                        width=320,
                     )
                     cam2_img = gr.Image(
                         label="Camera 2",
                         show_label=True,
-                        height=280,
-                        width=450,
+                        height=240,
+                        width=320,
                     )
-                    gr.Column(scale=1)  # Right spacer
+                    cam3_img = gr.Image(
+                        label="Camera 3",
+                        show_label=True,
+                        height=240,
+                        width=320,
+                    )
 
                 # Combined arm joints + gripper plot (stacked with shared x-axis)
                 combined_plot = gr.Plot(
@@ -943,18 +1137,18 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             fn=load_episode,
             inputs=[episode_dropdown],
             outputs=[
-                cam1_img, cam2_img,
+                cam1_img, cam2_img, cam3_img,
                 combined_plot,
                 timeline_slider, timeline_slider,
                 frame_info, task_display,
-                cam1_img, cam2_img,  # For label updates
+                cam1_img, cam2_img, cam3_img,  # For label updates
             ],
         )
 
         timeline_slider.change(
             fn=update_frame,
             inputs=[timeline_slider],
-            outputs=[cam1_img, cam2_img, combined_plot, frame_info],
+            outputs=[cam1_img, cam2_img, cam3_img, combined_plot, frame_info],
             show_progress="hidden",
         )
 
@@ -995,7 +1189,7 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
             fn=advance_frame,
             inputs=[timeline_slider, speed_slider],
             outputs=[
-                cam1_img, cam2_img,
+                cam1_img, cam2_img, cam3_img,
                 frame_info, timeline_slider,
                 timer,
             ],
@@ -1026,7 +1220,7 @@ def create_app(default_dataset: str = ".", default_format: str = "v2") -> gr.Blo
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description="LeRobot Dataset Visualizer")
+    parser = argparse.ArgumentParser(description="Robot Dataset Visualizer")
     parser.add_argument(
         "--dataset", "-d",
         type=str,
