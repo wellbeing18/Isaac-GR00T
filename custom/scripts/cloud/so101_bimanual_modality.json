@@ -1,0 +1,73 @@
+{
+    "_comment": "Bimanual SO-101 modality configuration for GR00T 1.6",
+    "_description": "12 DOF bimanual: left_arm(5) + left_gripper(1) + right_arm(5) + right_gripper(1)",
+    "_cameras": ["observation.images.head", "observation.images.left_wrist", "observation.images.right_wrist"],
+
+    "state": {
+        "left_arm": {
+            "start": 0,
+            "end": 5,
+            "_joints": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+        },
+        "left_gripper": {
+            "start": 5,
+            "end": 6,
+            "_joints": ["gripper"]
+        },
+        "right_arm": {
+            "start": 6,
+            "end": 11,
+            "_joints": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+        },
+        "right_gripper": {
+            "start": 11,
+            "end": 12,
+            "_joints": ["gripper"]
+        }
+    },
+
+    "action": {
+        "left_arm": {
+            "start": 0,
+            "end": 5,
+            "_joints": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+        },
+        "left_gripper": {
+            "start": 5,
+            "end": 6,
+            "_joints": ["gripper"]
+        },
+        "right_arm": {
+            "start": 6,
+            "end": 11,
+            "_joints": ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+        },
+        "right_gripper": {
+            "start": 11,
+            "end": 12,
+            "_joints": ["gripper"]
+        }
+    },
+
+    "video": {
+        "head": {
+            "original_key": "observation.images.head",
+            "_description": "Head-mounted camera for scene overview"
+        },
+        "left_wrist": {
+            "original_key": "observation.images.left_wrist",
+            "_description": "Left wrist camera for manipulation"
+        },
+        "right_wrist": {
+            "original_key": "observation.images.right_wrist",
+            "_description": "Right wrist camera for manipulation"
+        }
+    },
+
+    "annotation": {
+        "human.action.task_description": {
+            "original_key": "task_index",
+            "_description": "Task description from tasks.jsonl via task_index"
+        }
+    }
+}
