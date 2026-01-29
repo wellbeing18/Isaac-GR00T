@@ -91,7 +91,6 @@ def download_dataset(repo_id: str, output_dir: Path, revision: str = "main") -> 
             repo_type="dataset",
             revision=revision,
             local_dir=str(local_dir),
-            local_dir_use_symlinks=False,
         )
     except Exception as e:
         print(f"ERROR: Failed to download dataset: {e}")
