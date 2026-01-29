@@ -137,25 +137,10 @@ if [ -d "$DATASET_LOCAL_PATH/meta" ]; then
 else
     log "Downloading $DATASET_REPO_ID to $DATASET_LOCAL_PATH..."
 
-    # Use huggingface-cli to download
-    pip install huggingface_hub --quiet
-
-    python -c "
-from huggingface_hub import snapshot_download
-import os
-
-repo_id = '$DATASET_REPO_ID'
-local_dir = '$DATASET_LOCAL_PATH'
-
-print(f'Downloading {repo_id} to {local_dir}...')
-snapshot_download(
-    repo_id=repo_id,
-    repo_type='dataset',
-    local_dir=local_dir,
-    local_dir_use_symlinks=False,
-)
-print('Download complete!')
-"
+    # Use the download script
+    python custom/scripts/cloud/download_hf_dataset.py \
+        --repo-id "$DATASET_REPO_ID" \
+        --output "$DATASET_DOWNLOAD_DIR"
 fi
 
 # Verify download
